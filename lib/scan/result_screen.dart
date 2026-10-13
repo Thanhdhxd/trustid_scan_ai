@@ -2562,9 +2562,9 @@ class _ResultScreenState extends ConsumerState<ResultScreen> {
           const SizedBox(height: 12),
           Text(
             risk.level == 'HIGH_RISK'
-                ? 'Phát hiện rủi ro quét bất thường (Điểm rủi ro: )'
+                ? 'Phát hiện rủi ro quét bất thường (Điểm rủi ro: ${risk.anomalyScore.toStringAsFixed(2)})'
                 : risk.level == 'WATCH'
-                    ? 'Cần chú ý theo dõi hành vi quét (Điểm rủi ro: )'
+                    ? 'Cần chú ý theo dõi hành vi quét (Điểm rủi ro: ${risk.anomalyScore.toStringAsFixed(2)})'
                     : 'Mã quét được xác thực an toàn. Không phát hiện hành vi quét gian lận.',
             style: const TextStyle(color: Colors.white, fontSize: 13.5, height: 1.4),
           ),
@@ -2573,11 +2573,11 @@ class _ResultScreenState extends ConsumerState<ResultScreen> {
             spacing: 8,
             runSpacing: 6,
             children: [
-              _buildRiskPill(Icons.qr_code, 'Lượt quét: '),
+              _buildRiskPill(Icons.qr_code, 'Lượt quét: ${risk.scanCount}'),
               if (risk.distanceKm > 0)
-                _buildRiskPill(Icons.navigation_outlined, 'Khoảng cách:  km'),
+                _buildRiskPill(Icons.navigation_outlined, 'Khoảng cách: ${risk.distanceKm.toStringAsFixed(1)} km'),
               if (risk.minutesSincePrev > 0)
-                _buildRiskPill(Icons.schedule, 'Cách lần trước:  phút'),
+                _buildRiskPill(Icons.schedule, 'Cách lần trước: ${risk.minutesSincePrev.toStringAsFixed(1)} phút'),
             ],
           ),
           if (risk.reasons.isNotEmpty) ...[
