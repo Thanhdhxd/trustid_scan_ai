@@ -47,28 +47,42 @@ class _ResultScreenState extends ConsumerState<ResultScreen> {
   }
 
   Future<Map<String, dynamic>> _loadWithLocation() async {
-    // 1. Lấy nhanh vị trí lưu gần nhất (0ms) để không khóa UI
-    double? lat;
-    double? lng;
+    // 1. Lấy vị trí GPS thời gian thực (hỗ trợ cả Mobile thực tế lẫn Sensors trong Chrome DevTools)
+    double lat = 21.0285;
+    double lng = 105.8542;
     try {
-      final lastPos = await Geolocator.getLastKnownPosition();
-      if (lastPos != null) {
-        lat = lastPos.latitude;
-        lng = lastPos.longitude;
+      LocationPermission permission = await Geolocator.checkPermission();
+      if (permission == LocationPermission.denied) {
+        permission = await Geolocator.requestPermission();
       }
-    } catch (_) {}
+      if (permission == LocationPermission.always || permission == LocationPermission.whileInUse) {
+        final pos = await Geolocator.getCurrentPosition(
+          locationSettings: const LocationSettings(
+            accuracy: LocationAccuracy.medium,
+            timeLimit: Duration(seconds: 2),
+          ),
+        );
+        lat = pos.latitude;
+        lng = pos.longitude;
+      }
+    } catch (_) {
+      try {
+        final lastPos = await Geolocator.getLastKnownPosition();
+        if (lastPos != null) {
+          lat = lastPos.latitude;
+          lng = lastPos.longitude;
+        }
+      } catch (_) {}
+    }
 
-    // 2. Dò GPS ngầm phía sau
-    _fetchFreshGpsInBackground();
-
-    // 3. Tải song song dữ liệu truy xuất và điểm rủi ro AI
+    // 2. Tải song song dữ liệu truy xuất và điểm rủi ro AI
     try {
       final traceFuture = _traceRepo.getPublicTraceability(widget.code);
       final riskFuture = _riskRepo
           .getRiskScore(
             code: widget.code,
-            lat: lat ?? 21.0285,
-            long: lng ?? 105.8542,
+            lat: lat,
+            long: lng,
           )
           .catchError(
             (_) => RiskResult(
