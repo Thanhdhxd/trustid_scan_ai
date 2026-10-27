@@ -318,55 +318,66 @@ class _FarmerHomeScreenState extends ConsumerState<FarmerHomeScreen> {
       child: Row(
         mainAxisAlignment: MainAxisAlignment.spaceBetween,
         children: [
-          GestureDetector(
-            onTap: () => context.push('/farmer/profile'),
-            child: Row(
-              children: [
-                UserAvatar(
-                  avatarUrl: authState.value?.avatar,
-                  fullName: authState.value?.fullName ?? (authState.value?.role == 'TEAM_LEADER' ? 'Đội trưởng' : 'Nông dân'),
-                  size: 48,
-                  borderColor: kPrimaryColor,
-                  onTap: () => context.push('/farmer/profile'),
-                ),
-                const SizedBox(width: 12),
-                Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      authState.value?.role == 'TEAM_LEADER' ? '🌾 Đội trưởng' : '👨‍🌾 Nông dân',
-                      style: const TextStyle(
-                        color: kPrimaryColor,
-                        fontSize: 12,
-                        fontWeight: FontWeight.bold,
-                      ),
-                    ),
-                    const SizedBox(height: 2),
-                    authState.when(
-                      data: (user) => Text(
-                        user?.fullName ?? (authState.value?.role == 'TEAM_LEADER' ? 'Đội trưởng' : 'Nông dân'),
-                        style: const TextStyle(
-                          color: kTextLight,
-                          fontWeight: FontWeight.bold,
-                          fontSize: 16,
+          Expanded(
+            child: GestureDetector(
+              onTap: () => context.push('/farmer/profile'),
+              child: Row(
+                children: [
+                  UserAvatar(
+                    avatarUrl: authState.value?.avatar,
+                    fullName: authState.value?.fullName ?? (authState.value?.role == 'TEAM_LEADER' ? 'Đội trưởng' : 'Nông dân'),
+                    size: 48,
+                    borderColor: kPrimaryColor,
+                    onTap: () => context.push('/farmer/profile'),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Text(
+                          authState.value?.role == 'TEAM_LEADER' ? '🌾 Đội trưởng' : '👨‍🌾 Nông dân',
+                          style: const TextStyle(
+                            color: kPrimaryColor,
+                            fontSize: 12,
+                            fontWeight: FontWeight.bold,
+                          ),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
                         ),
-                      ),
-                      loading: () => const SizedBox(
-                        width: 60,
-                        height: 16,
-                        child: LinearProgressIndicator(
-                          color: kPrimaryColor,
-                          backgroundColor: kSurfaceDark,
+                        const SizedBox(height: 2),
+                        authState.when(
+                          data: (user) => Text(
+                            user?.fullName ?? (authState.value?.role == 'TEAM_LEADER' ? 'Đội trưởng' : 'Nông dân'),
+                            style: const TextStyle(
+                              color: kTextLight,
+                              fontWeight: FontWeight.bold,
+                              fontSize: 16,
+                            ),
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                          loading: () => const SizedBox(
+                            width: 60,
+                            height: 16,
+                            child: LinearProgressIndicator(
+                              color: kPrimaryColor,
+                              backgroundColor: kSurfaceDark,
+                            ),
+                          ),
+                          error: (_, __) => const Text('User', style: TextStyle(color: kTextLight)),
                         ),
-                      ),
-                      error: (_, __) => const Text('User', style: TextStyle(color: kTextLight)),
+                      ],
                     ),
-                  ],
-                ),
-              ],
+                  ),
+                ],
+              ),
             ),
           ),
+          const SizedBox(width: 8),
           Row(
+            mainAxisSize: MainAxisSize.min,
             children: [
               _buildIconBtn(Icons.qr_code_scanner, () {
                 context.push('/consumer/scan');

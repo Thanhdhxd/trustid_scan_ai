@@ -158,42 +158,52 @@ class _FarmingDiaryScreenState extends ConsumerState<FarmingDiaryScreen> {
           Row(
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
-              Row(
-                children: [
-                  IconButton(
-                    icon: const Icon(Icons.arrow_back, color: kTextGray),
-                    onPressed: () {
-                      if (Navigator.canPop(context)) {
-                        context.pop();
-                      } else {
-                        ref.read(authControllerProvider.notifier).logout();
-                      }
-                    },
-                  ),
-                  const SizedBox(width: 8),
-                  Container(
-                    width: 32, height: 32,
-                    decoration: BoxDecoration(
-                      color: kPrimaryColor,
-                      borderRadius: BorderRadius.circular(8),
+              Expanded(
+                child: Row(
+                  children: [
+                    IconButton(
+                      icon: const Icon(Icons.arrow_back, color: kTextGray),
+                      onPressed: () {
+                        if (Navigator.canPop(context)) {
+                          context.pop();
+                        } else {
+                          ref.read(authControllerProvider.notifier).logout();
+                        }
+                      },
                     ),
-                    child: const Icon(Icons.eco, color: Colors.white, size: 20),
-                  ),
-                  const SizedBox(width: 12),
-                  Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      const Text('TRUSTID', style: TextStyle(color: kPrimaryColor, fontSize: 10, fontWeight: FontWeight.bold, letterSpacing: 1.2)),
-                      Row(
+                    const SizedBox(width: 8),
+                    Container(
+                      width: 32, height: 32,
+                      decoration: BoxDecoration(
+                        color: kPrimaryColor,
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                      child: const Icon(Icons.eco, color: Colors.white, size: 20),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
-                          const Text('Nhật ký điện tử', style: TextStyle(color: kTextLight, fontSize: 18, fontWeight: FontWeight.bold)),
-                          const SizedBox(width: 8),
-                          _buildNetworkIndicator(),
+                          const Text('TRUSTID', style: TextStyle(color: kPrimaryColor, fontSize: 10, fontWeight: FontWeight.bold, letterSpacing: 1.2)),
+                          Row(
+                            children: [
+                              const Flexible(
+                                child: Text(
+                                  'Nhật ký điện tử',
+                                  style: TextStyle(color: kTextLight, fontSize: 18, fontWeight: FontWeight.bold),
+                                  overflow: TextOverflow.ellipsis,
+                                ),
+                              ),
+                              const SizedBox(width: 8),
+                              _buildNetworkIndicator(),
+                            ],
+                          ),
                         ],
                       ),
-                    ],
-                  ),
-                ],
+                    ),
+                  ],
+                ),
               ),
               Row(
                 children: [
@@ -329,11 +339,16 @@ class _FarmingDiaryScreenState extends ConsumerState<FarmingDiaryScreen> {
     return StreamBuilder<List<ConnectivityResult>>(
       stream: Connectivity().onConnectivityChanged,
       builder: (context, snapshot) {
-        final results = snapshot.data ?? [ConnectivityResult.wifi];
-        final hasNet = results.any((r) => r != ConnectivityResult.none);
-        
-        return ValueListenableBuilder<Box<SyncQueueItem>>(
-          valueListenable: Hive.box<SyncQueueItem>('farming_sync_queue').listenable(),
+        try {
+          final results = snapshot.data ?? [ConnectivityResult.wifi];
+          final hasNet = results.any((r) => r != ConnectivityResult.none);
+          
+          if (!Hive.isBoxOpen('farming_sync_queue')) {
+            return const SizedBox.shrink();
+          }
+
+          return ValueListenableBuilder<Box<SyncQueueItem>>(
+            valueListenable: Hive.box<SyncQueueItem>('farming_sync_queue').listenable(),
           builder: (context, box, _) {
             final queueCount = box.length;
             if (!hasNet) {
@@ -401,9 +416,12 @@ class _FarmingDiaryScreenState extends ConsumerState<FarmingDiaryScreen> {
             );
           },
         );
-      },
-    );
-  }
+      } catch (_) {
+        return const SizedBox.shrink();
+      }
+    },
+  );
+}
 
   Widget _buildFilterBar(WidgetRef ref) {
     final dateRange = ref.watch(selectedDateRangeProvider);

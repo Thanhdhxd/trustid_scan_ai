@@ -5,12 +5,14 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hive_flutter/hive_flutter.dart';
 import 'package:trustid_scan_ai/core/api_client.dart';
 import '../domain/farming_task.dart';
+import '../domain/farming_task_adapter.dart';
 import '../domain/crop_cycle.dart';
 import '../domain/location.dart';
 import '../domain/material.dart';
 import '../domain/template.dart';
 import '../domain/product.dart';
 import '../domain/sync_queue_item.dart';
+import '../domain/sync_queue_item_adapter.dart';
 
 final farmRepositoryProvider = Provider((ref) => FarmRepository(companyApi));
 
@@ -18,8 +20,36 @@ class FarmRepository {
   final Dio _dio;
   FarmRepository(this._dio);
 
+  Future<Box<FarmingTask>?> _getTaskBox() async {
+    try {
+      if (!Hive.isAdapterRegistered(0)) {
+        Hive.registerAdapter(FarmingTaskAdapter());
+      }
+      if (Hive.isBoxOpen('farming_tasks')) {
+        return Hive.box<FarmingTask>('farming_tasks');
+      }
+      return await Hive.openBox<FarmingTask>('farming_tasks');
+    } catch (_) {
+      return null;
+    }
+  }
+
+  Future<Box<SyncQueueItem>?> _getSyncBox() async {
+    try {
+      if (!Hive.isAdapterRegistered(11)) {
+        Hive.registerAdapter(SyncQueueItemAdapter());
+      }
+      if (Hive.isBoxOpen('farming_sync_queue')) {
+        return Hive.box<SyncQueueItem>('farming_sync_queue');
+      }
+      return await Hive.openBox<SyncQueueItem>('farming_sync_queue');
+    } catch (_) {
+      return null;
+    }
+  }
+
   Future<List<FarmingTask>> getDailyTasks({String? date, String? locationId, String? cycleId, String? assigneeId}) async {
-    final box = Hive.box<FarmingTask>('farming_tasks');
+    final box = await _getTaskBox();
     
     try {
       final response = await _dio.get('/farm/logs', queryParameters: {
@@ -37,12 +67,16 @@ class FarmRepository {
       }
       final tasks = data.map((e) => FarmingTask.fromJson(e)).toList();
 
-      await box.putAll({for (var t in tasks) t.id: t});
+      if (box != null && box.isOpen) {
+        try {
+          await box.putAll({for (var t in tasks) t.id: t});
+        } catch (_) {}
+      }
       
       return tasks;
     } catch (e) {
       // OFFLINE FALLBACK
-      if (box.isNotEmpty) {
+      if (box != null && box.isOpen && box.isNotEmpty) {
         final all = box.values.toList();
         if (date != null) {
            final targetDate = DateTime.parse(date);
@@ -82,9 +116,9 @@ class FarmRepository {
 
   Future<void> updateTaskStatus(String id, String status, {String? notes, List<String>? evidencePhotos, List<Map<String, dynamic>>? materialsUsed}) async {
     // Optimistic Update
-    final box = Hive.box<FarmingTask>('farming_tasks');
-    final task = box.get(id);
-    if (task != null) {
+    final box = await _getTaskBox();
+    final task = box?.get(id);
+    if (box != null && box.isOpen && task != null) {
        // Create copy with new status
        final updated = FarmingTask(
          id: task.id, title: task.title, description: task.description, 
@@ -96,7 +130,9 @@ class FarmRepository {
          assigneeName: task.assigneeName,
          cropName: task.cropName,
        );
-       await box.put(id, updated);
+       try {
+         await box.put(id, updated);
+       } catch (_) {}
     }
 
     try {
@@ -108,7 +144,7 @@ class FarmRepository {
       });
     } catch (e) {
       // Enqueue to offline sync queue
-      final queueBox = Hive.box<SyncQueueItem>('farming_sync_queue');
+      final queueBox = await _getSyncBox();
       final syncItem = SyncQueueItem(
         taskId: id,
         status: status,
@@ -117,14 +153,18 @@ class FarmRepository {
         materialsUsed: materialsUsed,
         createdAt: DateTime.now(),
       );
-      await queueBox.put(id, syncItem);
+      if (queueBox != null && queueBox.isOpen) {
+        try {
+          await queueBox.put(id, syncItem);
+        } catch (_) {}
+      }
       throw Exception('Sync failed, saved locally');
     }
   }
 
   Future<void> processSyncQueue() async {
-    final queueBox = Hive.box<SyncQueueItem>('farming_sync_queue');
-    if (queueBox.isEmpty) return;
+    final queueBox = await _getSyncBox();
+    if (queueBox == null || !queueBox.isOpen || queueBox.isEmpty) return;
 
     final items = queueBox.values.toList();
     // Sort oldest first

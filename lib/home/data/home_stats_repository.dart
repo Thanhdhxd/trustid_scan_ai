@@ -1,15 +1,9 @@
 import 'package:dio/dio.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:trustid_scan_ai/core/api_client.dart';
 import 'consumer_models.dart';
 
-final dioProvider = Provider((ref) {
-  final dio = Dio(BaseOptions(
-    baseUrl: 'https://api.trustid.com.vn',
-    connectTimeout: const Duration(seconds: 5),
-    receiveTimeout: const Duration(seconds: 5),
-  ));
-  return dio;
-});
+final dioProvider = Provider((ref) => companyApi);
 
 final homeStatsRepositoryProvider = Provider((ref) => HomeStatsRepository(ref.read(dioProvider)));
 final traceabilityRepositoryProvider = Provider((ref) => ref.read(homeStatsRepositoryProvider));

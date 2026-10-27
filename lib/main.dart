@@ -13,12 +13,27 @@ import 'supply/presentation/warehouse/warehouse_home_screen.dart';
 import 'supply/presentation/dealer/dealer_home_screen.dart';
 import 'kcs/presentation/kcs_dashboard_screen.dart';
 
+import 'farm/domain/farming_task.dart';
+import 'farm/domain/farming_task_adapter.dart';
+import 'farm/domain/sync_queue_item.dart';
+import 'farm/domain/sync_queue_item_adapter.dart';
+
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   
-  // Khởi tạo Hive để lưu Lịch sử cục bộ (Local History)
+  // Khởi tạo Hive để lưu Lịch sử cục bộ (Local History) và Offline Task cho Nông dân
   await Hive.initFlutter();
+
+  if (!Hive.isAdapterRegistered(0)) {
+    Hive.registerAdapter(FarmingTaskAdapter());
+  }
+  if (!Hive.isAdapterRegistered(11)) {
+    Hive.registerAdapter(SyncQueueItemAdapter());
+  }
+
   await Hive.openBox('scan_history');
+  await Hive.openBox<FarmingTask>('farming_tasks');
+  await Hive.openBox<SyncQueueItem>('farming_sync_queue');
   
   // Cấu hình interceptor cho API
   // Interceptors được khởi tạo trực tiếp trong api_client.dart
