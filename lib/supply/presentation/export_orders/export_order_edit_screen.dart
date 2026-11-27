@@ -422,7 +422,7 @@ class _ExportOrderEditScreenState extends ConsumerState<ExportOrderEditScreen> {
           Row(
             children: [
               Expanded(
-                flex: 1,
+                flex: 5,
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
@@ -437,21 +437,32 @@ class _ExportOrderEditScreenState extends ConsumerState<ExportOrderEditScreen> {
                       ),
                       child: Row(
                         children: [
-                          IconButton(
-                            icon: const Icon(Icons.remove, color: Colors.white, size: 16),
-                            onPressed: item.quantity > 1 ? () {
-                              setState(() {
-                                item.quantity--;
-                                item.qtyController.text = item.quantity.toString();
-                              });
-                            } : null,
+                          InkWell(
+                            onTap: item.quantity > 1
+                                ? () {
+                                    setState(() {
+                                      item.quantity--;
+                                      item.qtyController.text = item.quantity.toString();
+                                    });
+                                  }
+                                : null,
+                            borderRadius: const BorderRadius.horizontal(left: Radius.circular(8)),
+                            child: SizedBox(
+                              width: 34,
+                              height: 48,
+                              child: Icon(
+                                Icons.remove,
+                                color: item.quantity > 1 ? Colors.white : Colors.white24,
+                                size: 16,
+                              ),
+                            ),
                           ),
                           Expanded(
                             child: TextField(
                               controller: item.qtyController,
                               keyboardType: TextInputType.number,
                               textAlign: TextAlign.center,
-                              style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
+                              style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 14),
                               decoration: const InputDecoration(
                                 border: InputBorder.none,
                                 isDense: true,
@@ -465,14 +476,19 @@ class _ExportOrderEditScreenState extends ConsumerState<ExportOrderEditScreen> {
                               },
                             ),
                           ),
-                          IconButton(
-                            icon: const Icon(Icons.add, color: Colors.white, size: 16),
-                            onPressed: () {
+                          InkWell(
+                            onTap: () {
                               setState(() {
                                 item.quantity++;
                                 item.qtyController.text = item.quantity.toString();
                               });
                             },
+                            borderRadius: const BorderRadius.horizontal(right: Radius.circular(8)),
+                            child: const SizedBox(
+                              width: 34,
+                              height: 48,
+                              child: Icon(Icons.add, color: Colors.white, size: 16),
+                            ),
                           ),
                         ],
                       ),
@@ -482,7 +498,7 @@ class _ExportOrderEditScreenState extends ConsumerState<ExportOrderEditScreen> {
               ),
               const SizedBox(width: 12),
               Expanded(
-                flex: 2,
+                flex: 6,
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
@@ -523,6 +539,16 @@ class _ExportOrderEditScreenState extends ConsumerState<ExportOrderEditScreen> {
     required Function(String?) onChanged,
     bool isRequired = false,
   }) {
+    final seenIds = <String>{};
+    final uniqueItems = <Map<String, dynamic>>[];
+    for (final raw in items) {
+      if (raw is! Map) continue;
+      final id = raw['id']?.toString() ?? '';
+      if (id.isEmpty || !seenIds.add(id)) continue;
+      uniqueItems.add(Map<String, dynamic>.from(raw));
+    }
+    final validValue = (value != null && seenIds.contains(value)) ? value : null;
+
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -546,14 +572,16 @@ class _ExportOrderEditScreenState extends ConsumerState<ExportOrderEditScreen> {
             child: DropdownButton<String>(
               isExpanded: true,
               dropdownColor: const Color(0xFF16325B),
-              icon: const Icon(Icons.arrow_drop_down, color: Colors.grey),
-              value: value,
-              hint: Text(hint, style: const TextStyle(color: Colors.white24, fontSize: 14)),
+              icon: const Icon(Icons.arrow_drop_down, color: Colors.white70),
+              value: validValue,
+              hint: Text(hint, style: const TextStyle(color: Colors.white38, fontSize: 14)),
               style: const TextStyle(color: Colors.white, fontSize: 14),
-              items: items.map((item) {
+              items: uniqueItems.map((item) {
+                final id = item['id'].toString();
+                final name = (item['name'] ?? id).toString();
                 return DropdownMenuItem<String>(
-                  value: item['id'],
-                  child: Text(item['name'] ?? item['id']),
+                  value: id,
+                  child: Text(name, overflow: TextOverflow.ellipsis),
                 );
               }).toList(),
               onChanged: onChanged,
@@ -568,6 +596,14 @@ class _ExportOrderEditScreenState extends ConsumerState<ExportOrderEditScreen> {
     required String? value,
     required Function(String?) onChanged,
   }) {
+    final seenIds = <String>{};
+    final uniqueProducts = <Product>[];
+    for (final p in _products) {
+      if (p.id.isEmpty || !seenIds.add(p.id)) continue;
+      uniqueProducts.add(p);
+    }
+    final validValue = (value != null && seenIds.contains(value)) ? value : null;
+
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 12),
       decoration: BoxDecoration(
@@ -579,14 +615,14 @@ class _ExportOrderEditScreenState extends ConsumerState<ExportOrderEditScreen> {
         child: DropdownButton<String>(
           isExpanded: true,
           dropdownColor: const Color(0xFF16325B),
-          icon: const Icon(Icons.arrow_drop_down, color: Colors.grey),
-          value: value,
-          hint: const Text('Chọn sản phẩm...', style: TextStyle(color: Colors.white24, fontSize: 14)),
+          icon: const Icon(Icons.arrow_drop_down, color: Colors.white70),
+          value: validValue,
+          hint: const Text('Chọn sản phẩm...', style: TextStyle(color: Colors.white38, fontSize: 14)),
           style: const TextStyle(color: Colors.white, fontSize: 14),
-          items: _products.map((item) {
+          items: uniqueProducts.map((item) {
             return DropdownMenuItem<String>(
               value: item.id,
-              child: Text(item.name),
+              child: Text(item.name, overflow: TextOverflow.ellipsis),
             );
           }).toList(),
           onChanged: onChanged,

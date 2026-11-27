@@ -15,10 +15,14 @@ class User {
   final String? tenantName;
   final String? phoneNumber;
   final String? leaderId;
-  
+  final Map<String, dynamic>? moduleConfig;
+  final List<String>? permissions;
+  final List<String>? hiddenMenus;
+  final List<String>? globalHiddenMenus;
+
   User({
-    required this.id, 
-    required this.username, 
+    required this.id,
+    required this.username,
     required this.fullName,
     required this.role,
     this.email,
@@ -28,9 +32,46 @@ class User {
     this.tenantName,
     this.phoneNumber,
     this.leaderId,
+    this.moduleConfig,
+    this.permissions,
+    this.hiddenMenus,
+    this.globalHiddenMenus,
   });
-  
+
   factory User.fromJson(Map<String, dynamic> json) {
+    Map<String, dynamic>? parsedModuleConfig;
+    if (json['moduleConfig'] is Map) {
+      parsedModuleConfig = Map<String, dynamic>.from(json['moduleConfig']);
+    } else if (json['module_config'] is Map) {
+      parsedModuleConfig = Map<String, dynamic>.from(json['module_config']);
+    } else if (json['tenant'] is Map) {
+      final t = json['tenant'];
+      if (t['moduleConfig'] is Map) {
+        parsedModuleConfig = Map<String, dynamic>.from(t['moduleConfig']);
+      } else if (t['module_config'] is Map) {
+        parsedModuleConfig = Map<String, dynamic>.from(t['module_config']);
+      }
+    }
+
+    List<String>? parsedPermissions;
+    if (json['permissions'] is List) {
+      parsedPermissions = (json['permissions'] as List).map((e) => e.toString()).toList();
+    } else if (json['role'] is Map && json['role']['permissions'] is List) {
+      parsedPermissions = (json['role']['permissions'] as List).map((e) => e.toString()).toList();
+    }
+
+    List<String>? parsedHiddenMenus;
+    if (json['hiddenMenus'] is List) {
+      parsedHiddenMenus = (json['hiddenMenus'] as List).map((e) => e.toString()).toList();
+    } else if (json['role'] is Map && json['role']['hiddenMenus'] is List) {
+      parsedHiddenMenus = (json['role']['hiddenMenus'] as List).map((e) => e.toString()).toList();
+    }
+
+    List<String>? parsedGlobalHiddenMenus;
+    if (json['globalHiddenMenus'] is List) {
+      parsedGlobalHiddenMenus = (json['globalHiddenMenus'] as List).map((e) => e.toString()).toList();
+    }
+
     return User(
       id: json['id'] ?? '',
       username: json['username'] ?? '',
@@ -43,6 +84,10 @@ class User {
       tenantName: json['tenantName'] ?? (json['tenant'] is Map ? json['tenant']['name'] : null),
       phoneNumber: json['phoneNumber'] ?? json['phone_number'],
       leaderId: json['leaderId'] ?? json['leader_id'],
+      moduleConfig: parsedModuleConfig,
+      permissions: parsedPermissions,
+      hiddenMenus: parsedHiddenMenus,
+      globalHiddenMenus: parsedGlobalHiddenMenus,
     );
   }
 

@@ -1129,8 +1129,10 @@ class _ResultScreenState extends ConsumerState<ResultScreen> {
       String dateFormatted = '';
       if (timeStr.isNotEmpty) {
         try {
-          dateFormatted = DateFormat('dd/MM/yyyy HH:mm').format(DateTime.parse(timeStr).toLocal());
-        } catch (_) {}
+          dateFormatted = DateFormat('dd/MM/yyyy').format(DateTime.parse(timeStr).toLocal());
+        } catch (_) {
+          dateFormatted = timeStr;
+        }
       }
 
       final isCompleted = statusStr == 'completed';
@@ -1931,11 +1933,22 @@ class _ResultScreenState extends ConsumerState<ResultScreen> {
                           ],
                         ),
                         SizedBox(height: 4),
-                        Text(
-                          e['time'] != null 
-                              ? DateFormat('dd/MM/yyyy HH:mm').format(DateTime.parse(e['time'].toString()).toLocal()) 
-                              : '',
-                          style: TextStyle(color: ConsumerTheme.textGrey, fontSize: 12),
+                        Builder(
+                          builder: (context) {
+                            String timeStr = '';
+                            if (e['time'] != null) {
+                              try {
+                                timeStr = DateFormat('dd/MM/yyyy').format(DateTime.parse(e['time'].toString()).toLocal());
+                              } catch (_) {
+                                timeStr = e['time'].toString();
+                              }
+                            }
+                            if (timeStr.isEmpty) return const SizedBox.shrink();
+                            return Text(
+                              timeStr,
+                              style: TextStyle(color: ConsumerTheme.textGrey, fontSize: 12),
+                            );
+                          },
                         ),
                         if (e['description'] != null && (e['description'] as String).isNotEmpty) ...[
                           SizedBox(height: 4),

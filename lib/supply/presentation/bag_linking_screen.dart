@@ -1,1236 +1,842 @@
+import 'dart:async';
+import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:mobile_scanner/mobile_scanner.dart';
-import 'dart:async';
-import 'package:dio/dio.dart';
+import 'package:intl/intl.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:trustid_scan_ai/core/utils/app_toast.dart';
+import 'package:trustid_scan_ai/core/utils/error_utils.dart';
+import 'package:trustid_scan_ai/core/utils/scan_feedback_helper.dart';
+import 'package:trustid_scan_ai/scan/scanner_screen.dart';
 import '../data/supply_repository.dart';
 import '../domain/bag_mapping.dart';
-import 'package:intl/intl.dart';
+import '../domain/packaging_receipt.dart';
+import '../domain/production_order.dart';
+import 'bag_linking/dialogs/bag_packet_detail_sheet.dart';
+import 'bag_linking/dialogs/replace_packet_sheet.dart';
+import 'bag_linking/widgets/bag_linking_current_bag_banner.dart';
+import 'bag_linking/widgets/bag_linking_stats_row.dart';
+import 'order_list_screen.dart';
+import 'production_order/constants/prod_order_constants.dart';
+import 'production_order/constants/prod_order_helpers.dart';
 import 'widgets/bag_card_widget.dart';
 import 'widgets/warehouse_selector.dart';
-import 'package:trustid_scan_ai/scan/scanner_screen.dart';
 
+/// Màn hình Đóng Bao theo Phiếu (`BAG_PACKAGING` — `PackagingReceipt`).
+/// Quét 2 bước trực tuyến (Zero Offline Queue): Bước 1 kiểm tra bao `-B` (`validate-bag`), Bước 2 liên kết gói (`scan`).
 class BagLinkingScreen extends ConsumerStatefulWidget {
   final String orderId;
-  const BagLinkingScreen({super.key, required this.orderId});
+  final String? initialReceiptId;
+
+  const BagLinkingScreen({
+    super.key,
+    required this.orderId,
+    this.initialReceiptId,
+  });
 
   @override
   ConsumerState<BagLinkingScreen> createState() => _BagLinkingScreenState();
 }
 
 class _BagLinkingScreenState extends ConsumerState<BagLinkingScreen> {
-  static const Color kPrimaryColor = Color(0xFF00875A);
-  static const Color kBackgroundDark = Color(0xFF0F2B46);
-  static const Color kSurfaceDark = Color(0xFF16325B);
-  static const Color kTextLight = Color(0xFFE8EDF3);
-  static const Color kTextGray = Color(0xFF94A3B8);
-  static const Color kWarningColor = Color(0xFFFFA726);
+  static const int _pageWindowSize = 30;
 
   final _scanController = TextEditingController();
   late final FocusNode _scanFocusNode;
 
-  String _orderCode = '';
-  String _productName = '';
-  List<BagMapping> _bagMappings = [];
+  ProductionOrder? _order;
   String? _receiptId;
-  String? _selectedWarehouseId;
   String _receiptCode = '';
   String _receiptTime = '';
   String _receiptUser = '';
-  String _receiptStatus = '';
-  String _orderStatus = '';
-  bool _isLoading = true;
-  bool _isScanning = false;
-  Timer? _debounceTimer;
-  bool _hideKeyboard = false;
+  String _receiptStatus = 'PACKING';
+  String? _selectedWarehouseId;
+  String _warehouseName = '';
+
+  List<BagMapping> _bagMappings = [];
+  int _totalBags = 0;
+  int _totalPackets = 0;
+  int _visibleLimit = _pageWindowSize;
 
   // 2-step state
   String? _currentBagSerial;
-  int _currentBagPacketCount = 0;
 
-  bool get _isBagScanned => _currentBagSerial != null;
-  bool _isBagCode(String code) => code.toUpperCase().endsWith('-B');
+  bool _isLoading = true;
+  bool _isScanning = false;
+  bool _isSubmittingAction = false;
+  bool _hideKeyboard = false;
+  Timer? _pdaDebounceTimer;
 
-  /// Extract mã thực từ URL QR (http://trustid.com.vn/?Code=XXX → XXX)
-  String _extractCode(String raw) {
-    final trimmed = raw.trim();
-    final uri = Uri.tryParse(trimmed);
-    if (uri != null && uri.hasQuery) {
-      final code = uri.queryParameters['Code'] ?? uri.queryParameters['code'];
-      if (code != null && code.isNotEmpty) return code;
-    }
-    // Fallback: nếu chứa '=' thì lấy sau dấu '=' cuối cùng
-    if (trimmed.contains('=')) {
-      return trimmed.substring(trimmed.lastIndexOf('=') + 1);
-    }
-    return trimmed;
+  bool get _isBagScanned => _currentBagSerial != null && _currentBagSerial!.isNotEmpty;
+  bool get _isEditable => _receiptStatus == 'PACKING';
+  bool get _canReplace {
+    final oStatus = _order?.status ?? 'IN_PROGRESS';
+    return _isEditable &&
+        (oStatus == 'CODES_READY' || oStatus == 'IN_PROGRESS' || oStatus == 'APPROVED');
   }
+
+  bool _isBagCode(String code) => code.toUpperCase().contains('-B');
 
   @override
   void initState() {
     super.initState();
     _scanFocusNode = FocusNode(
-      debugLabel: 'scanFocusNode',
+      debugLabel: 'bagScanFocusNode',
       onKeyEvent: (node, event) {
-        if (!_hideKeyboard) return KeyEventResult.ignored;
-        
-        if (event is KeyDownEvent) {
-          final key = event.logicalKey;
-          if (key == LogicalKeyboardKey.enter || key == LogicalKeyboardKey.numpadEnter) {
-            if (_scanController.text.trim().isNotEmpty) {
-              _handleScan();
-            }
-            return KeyEventResult.handled;
-          } else if (key == LogicalKeyboardKey.backspace) {
-            if (_scanController.text.isNotEmpty) {
-              final newText = _scanController.text.substring(0, _scanController.text.length - 1);
-              _scanController.value = TextEditingValue(
-                text: newText,
-                selection: TextSelection.collapsed(offset: newText.length),
-              );
-            }
-            return KeyEventResult.handled;
-          } else if (event.character != null && event.character!.isNotEmpty) {
-            if (event.character == '\n' || event.character == '\r') {
-              if (_scanController.text.trim().isNotEmpty) {
-                _handleScan();
-              }
-            } else {
-              final newText = _scanController.text + event.character!;
-              _scanController.value = TextEditingValue(
-                text: newText,
-                selection: TextSelection.collapsed(offset: newText.length),
-              );
-            }
-            return KeyEventResult.handled;
+        if (!_hideKeyboard || event is! KeyDownEvent) {
+          return KeyEventResult.ignored;
+        }
+        final key = event.logicalKey;
+        if (key == LogicalKeyboardKey.enter || key == LogicalKeyboardKey.numpadEnter) {
+          if (_scanController.text.trim().isNotEmpty) {
+            _handleTextScan();
           }
+          return KeyEventResult.handled;
+        } else if (key == LogicalKeyboardKey.backspace) {
+          if (_scanController.text.isNotEmpty) {
+            final next = _scanController.text.substring(0, _scanController.text.length - 1);
+            _scanController.value = TextEditingValue(
+              text: next,
+              selection: TextSelection.collapsed(offset: next.length),
+            );
+          }
+          return KeyEventResult.handled;
+        } else if (event.character != null && event.character!.isNotEmpty) {
+          if (event.character == '\n' || event.character == '\r') {
+            if (_scanController.text.trim().isNotEmpty) {
+              _handleTextScan();
+            }
+          } else {
+            final next = _scanController.text + event.character!;
+            _scanController.value = TextEditingValue(
+              text: next,
+              selection: TextSelection.collapsed(offset: next.length),
+            );
+          }
+          return KeyEventResult.handled;
         }
         return KeyEventResult.ignored;
       },
     );
     _scanFocusNode.addListener(_onFocusChange);
     _loadPreferences();
-    _loadData();
-  }
-
-  void _onFocusChange() {
-    if (_scanFocusNode.hasFocus) {
-      if (_hideKeyboard) {
-        SystemChannels.textInput.invokeMethod('TextInput.hide');
-      }
-    } else {
-      if (!mounted) return;
-      final route = ModalRoute.of(context);
-      if (route != null && route.isCurrent) {
-        Future.delayed(const Duration(milliseconds: 100), () {
-          if (mounted && !_scanFocusNode.hasFocus && _scanFocusNode.canRequestFocus) {
-            if (route.isCurrent) {
-              _scanFocusNode.requestFocus();
-              if (_hideKeyboard) {
-                SystemChannels.textInput.invokeMethod('TextInput.hide');
-              }
-            }
-          }
-        });
-      }
-    }
-  }
-
-  void _refocus() {
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (mounted && _scanFocusNode.canRequestFocus) {
-        _scanFocusNode.requestFocus();
-        if (_hideKeyboard) {
-          SystemChannels.textInput.invokeMethod('TextInput.hide');
-        }
-      }
+      if (mounted) _loadInitialData();
     });
-  }
-
-  Future<void> _loadPreferences() async {
-    final prefs = await SharedPreferences.getInstance();
-    if (mounted) {
-      setState(() {
-        _hideKeyboard = prefs.getBool('hide_keyboard_pda') ?? false;
-      });
-    }
   }
 
   @override
   void dispose() {
     _scanFocusNode.removeListener(_onFocusChange);
-    _debounceTimer?.cancel();
+    _pdaDebounceTimer?.cancel();
     _scanController.dispose();
     _scanFocusNode.dispose();
     super.dispose();
   }
 
-  Future<void> _loadData({bool silent = false}) async {
-    if (!silent) {
-      setState(() => _isLoading = true);
+  void _onFocusChange() {
+    if (!_hideKeyboard) return;
+    if (_scanFocusNode.hasFocus) {
+      SystemChannels.textInput.invokeMethod('TextInput.hide');
+      return;
     }
+    if (!mounted) return;
+    final route = ModalRoute.of(context);
+    if (route != null && route.isCurrent) {
+      Future.delayed(const Duration(milliseconds: 100), () {
+        if (mounted &&
+            _hideKeyboard &&
+            !_scanFocusNode.hasFocus &&
+            _scanFocusNode.canRequestFocus) {
+          if (route.isCurrent && _isEditable) {
+            _scanFocusNode.requestFocus();
+            SystemChannels.textInput.invokeMethod('TextInput.hide');
+          }
+        }
+      });
+    }
+  }
+
+  void _refocus() {
+    if (!_hideKeyboard) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted && _hideKeyboard && _isEditable && _scanFocusNode.canRequestFocus) {
+        _scanFocusNode.requestFocus();
+        SystemChannels.textInput.invokeMethod('TextInput.hide');
+      }
+    });
+  }
+
+  Future<void> _loadPreferences() async {
     try {
-      final repo = ref.read(supplyRepositoryProvider);
-      final orderData = await repo.getProductionOrderDetail(widget.orderId);
-      final mappings = await repo.getOrderLotMappings(widget.orderId);
-      
-      String? receiptId;
-      String? receiptError;
-      final orderStatus = (orderData['status'] ?? '').toString().toUpperCase();
-      final linkedBags = mappings.where((m) {
-        final s = (m['lotStatus'] ?? m['lot_status'] ?? '').toString().toUpperCase();
-        return s == 'LINKED';
-      }).length;
-      final totalBags = mappings.length;
-      final stillOpen = totalBags == 0 || linkedBags < totalBags;
+      final prefs = await SharedPreferences.getInstance();
+      if (mounted) {
+        setState(() => _hideKeyboard = prefs.getBool('hide_keyboard_pda') ?? false);
+      }
+    } catch (_) {}
+  }
 
-      try {
-        final receiptData = await repo.getOrCreateReceipt(widget.orderId);
-        receiptId = _extractReceiptId(receiptData);
-        
-        final rMap = receiptData['receipt'] is Map ? receiptData['receipt'] as Map : receiptData;
-        _receiptCode = (rMap['receiptCode'] ?? rMap['code'] ?? '').toString();
-        
-        final dtStr = rMap['createdAt'] ?? rMap['created_at'];
-        if (dtStr != null) {
-          final parsed = DateTime.tryParse(dtStr.toString());
-          if (parsed != null) {
-            _receiptTime = DateFormat('HH:mm:ss dd/MM/yyyy').format(parsed.toLocal());
-          }
-        }
-        
-        final createdBy = rMap['createdBy'] ?? rMap['created_by'];
-        if (createdBy is Map) {
-          _receiptUser = (createdBy['fullName'] ?? createdBy['name'] ?? 'Demo').toString();
-        } else {
-          _receiptUser = createdBy?.toString() ?? 'Demo';
-        }
+  Future<void> _loadInitialData() async {
+    setState(() => _isLoading = true);
+    final repo = ref.read(supplyRepositoryProvider);
+    try {
+      Map<String, dynamic>? detailPayload;
+      String? receiptId = widget.initialReceiptId;
 
-        _selectedWarehouseId = (rMap['warehouseId'] ?? rMap['warehouse_id'])?.toString();
-
-        final receiptStatus = (rMap['status'] ?? '').toString().toUpperCase();
-        _receiptStatus = receiptStatus;
-
-        // Chỉ reopen khi phiếu đã COMPLETED. Phiếu đang PACKING mà gọi reopen → 400.
-        if (receiptId != null && stillOpen && receiptStatus == 'COMPLETED') {
-          final reopened = await repo.reopenIfIncompleteBagOrder(widget.orderId);
-          if (reopened && mounted) {
-            _showSnack('Đã mở lại phiếu — có thể đóng bao tiếp', isError: false);
-          }
-        } else if (stillOpen && orderStatus == 'COMPLETED' && receiptStatus != 'COMPLETED') {
-          // Lệnh đã đóng sớm, phiếu vẫn mở — app không đổi được status lệnh
-          receiptError =
-              'LSX đã Hoàn thành trên server trong khi còn thiếu bao. Cần backend/admin mở lại lệnh về IN_PROGRESS.';
-        }
-
-        if (receiptId == null || receiptId.isEmpty) {
-          receiptError ??= 'Không lấy được mã phiếu đóng bao';
-          receiptId = null;
-        }
-      } catch (e) {
-        receiptError = e is DioException
-            ? (e.response?.data?['message']?.toString() ?? 'Không tạo được phiếu đóng bao')
-            : e.toString();
-        print('Receipt lookup failed: $e');
-
-        final errLower = receiptError!.toLowerCase();
-        final blockedByStatus = errLower.contains('codes_ready') ||
-            errLower.contains('in_progress') ||
-            errLower.contains('trạng thái') ||
-            orderStatus == 'COMPLETED';
-
-        if (stillOpen && blockedByStatus) {
+      if (receiptId != null && receiptId.isNotEmpty) {
+        detailPayload = await repo.getReceiptDetail(receiptId);
+      } else {
+        final byOrder = await repo.getOrCreateReceipt(widget.orderId);
+        receiptId = (byOrder['id'] ??
+                byOrder['receiptId'] ??
+                byOrder['receipt']?['id'] ??
+                byOrder['receipt']?['receiptId'])
+            ?.toString();
+        if (receiptId != null && receiptId.isNotEmpty) {
           try {
-            final receipts = orderData['packagingReceipts'] ?? orderData['packaging_receipts'];
-            if (receipts is List && receipts.isNotEmpty) {
-              final first = receipts.first;
-              final id = (first['id'] ?? first['receiptId'])?.toString();
-              final rStatus = (first['status'] ?? '').toString().toUpperCase();
-              if (id != null && id.isNotEmpty && rStatus == 'COMPLETED') {
-                await repo.reopenReceipt(id);
-                final again = await repo.getOrCreateReceipt(widget.orderId);
-                receiptId = _extractReceiptId(again) ?? id;
-                receiptError = null;
-                if (mounted) {
-                  _showSnack('Đã mở lại phiếu — có thể đóng bao tiếp', isError: false);
-                }
-              } else {
-                receiptError =
-                    'LSX đã khóa (COMPLETED). Cần backend mở lại lệnh về IN_PROGRESS để đóng bao tiếp.';
-              }
-            }
-          } catch (reopenErr) {
-            final msg = reopenErr is DioException
-                ? (reopenErr.response?.data?['message']?.toString() ?? reopenErr.message)
-                : reopenErr.toString();
-            print('Reopen receipt failed: $msg');
+            detailPayload = await repo.getReceiptDetail(receiptId);
+          } catch (_) {
+            detailPayload = byOrder;
           }
         }
       }
 
-      if (mounted) {
-        setState(() {
-          _orderCode = orderData['orderCode'] ?? orderData['order_code'] ?? '';
-          _productName = orderData['product']?['name'] ?? orderData['productName'] ?? '';
-          _bagMappings = mappings.map((e) => BagMapping.fromJson(e)).toList();
-          _receiptId = receiptId;
-          _orderStatus = orderStatus;
-          _isLoading = false;
-        });
-        if (receiptError != null) {
-          _showSnack('❌ $receiptError — quét sẽ không lên web', isError: true);
-        }
-        _refocus();
+      if (detailPayload == null || receiptId == null || receiptId.isEmpty) {
+        if (!mounted) return;
+        AppToast.error(context, 'Không lấy được thông tin phiếu đóng bao.');
+        Navigator.of(context).pop();
+        return;
       }
+
+      Map<String, dynamic>? orderMap;
+      try {
+        orderMap = await repo.getProductionOrderDetail(widget.orderId);
+      } catch (_) {}
+
+      if (!mounted) return;
+      setState(() {
+        _receiptId = receiptId;
+        _applyReceiptAndOrder(detailPayload!, orderMap);
+        _isLoading = false;
+      });
+      _refocus();
     } catch (e) {
-      if (mounted) {
-        setState(() => _isLoading = false);
-        _showSnack('Lỗi tải dữ liệu: $e', isError: true);
+      final err = parseSupplyHttpError(e);
+      if (!mounted) return;
+      if (err.isForbidden) {
+        AppToast.error(
+          context,
+          err.message.isNotEmpty
+              ? err.message
+              : 'Chưa có phiếu đang mở, liên hệ quản lý tạo phiếu.',
+        );
+        Navigator.of(context).pop();
+        return;
+      }
+      setState(() => _isLoading = false);
+      AppToast.error(context, err.message);
+      if (err.isNotFound) {
+        Navigator.of(context).pop();
       }
     }
   }
 
-  String? _extractReceiptId(Map<String, dynamic> receiptData) {
-    final id = receiptData['id'] ??
-        receiptData['receiptId'] ??
-        receiptData['receipt']?['id'] ??
-        receiptData['receipt']?['receiptId'];
-    final s = id?.toString();
-    if (s == null || s.isEmpty) return null;
-    return s;
+  Future<void> _fetchBags() async {
+    final receiptId = _receiptId;
+    if (receiptId == null || receiptId.isEmpty) return;
+    try {
+      final detail = await ref.read(supplyRepositoryProvider).getReceiptDetail(receiptId);
+      if (!mounted) return;
+      setState(() {
+        _applyReceiptAndOrder(detail, null);
+      });
+    } catch (_) {}
   }
 
-  Future<void> _handleScan() async {
-    if (_isScanning) return;
-    _debounceTimer?.cancel();
+  void _applyReceiptAndOrder(
+    Map<String, dynamic> payload,
+    Map<String, dynamic>? orderJson,
+  ) {
+    final receiptRaw = payload['receipt'] is Map
+        ? Map<String, dynamic>.from(payload['receipt'] as Map)
+        : payload;
+    final parsedReceipt = PackagingReceipt.fromJson(receiptRaw);
 
-    final code = _extractCode(_scanController.text);
-    if (code.isEmpty) return;
-    if (_isBagCode(code)) {
-      _handleBagScan(code);
-    } else {
-      await _handlePacketScan(code);
+    final embeddedOrder = (payload['order'] ?? receiptRaw['order']) is Map
+        ? Map<String, dynamic>.from((payload['order'] ?? receiptRaw['order']) as Map)
+        : null;
+    final resolvedOrderMap = orderJson ?? embeddedOrder;
+    if (resolvedOrderMap != null) {
+      _order = ProductionOrder.fromJson(resolvedOrderMap);
+    }
+
+    final rawBagsList = (payload['bags'] ?? payload['linkedBags'] ?? receiptRaw['bags']) as List? ?? const [];
+    final parsedBags = rawBagsList
+        .whereType<Map>()
+        .map((e) => BagMapping.fromJson(Map<String, dynamic>.from(e)))
+        .toList()
+      ..sort((a, b) {
+        final da = a.scannedAt ?? a.linkedAt ?? DateTime(0);
+        final db = b.scannedAt ?? b.linkedAt ?? DateTime(0);
+        return db.compareTo(da);
+      });
+
+    _receiptCode = parsedReceipt.receiptCode;
+    _receiptStatus = parsedReceipt.status;
+    _receiptUser = parsedReceipt.packerName ?? _receiptUser;
+    _selectedWarehouseId = parsedReceipt.warehouseId ?? _order?.warehouseId;
+    _warehouseName = parsedReceipt.warehouseName ?? _order?.warehouseName ?? _warehouseName;
+
+    final dt = parsedReceipt.packingTime ?? parsedReceipt.createdAt;
+    if (dt != null) {
+      _receiptTime = DateFormat('HH:mm:ss dd/MM/yyyy').format(dt.toLocal());
+    }
+
+    _bagMappings = parsedBags;
+    _totalBags = parsedReceipt.totalBags > 0 ? parsedReceipt.totalBags : parsedBags.length;
+    _totalPackets = parsedReceipt.totalPackets > 0
+        ? parsedReceipt.totalPackets
+        : parsedBags.fold<int>(0, (sum, b) => sum + b.packetCount);
+
+    // Nếu bao đang chờ đã được đồng nghiệp đóng xong trên server thì bỏ giữ pending
+    if (_currentBagSerial != null &&
+        _bagMappings.any(
+          (b) => b.bagSerial == _currentBagSerial || b.bagQrCode == _currentBagSerial,
+        )) {
+      _currentBagSerial = null;
     }
   }
 
-  void _handleBagScan(String bagCode) {
+  Future<void> _handleTextScan() async {
+    if (_isScanning || !_isEditable) return;
+    _pdaDebounceTimer?.cancel();
+    final code = extractSerialCodeFromQr(_scanController.text);
+    if (code.isEmpty) return;
+
+    _scanController.clear();
+    await _processScan(code);
+    _refocus();
+  }
+
+  Future<void> _processScan(String code) async {
+    final receiptId = _receiptId;
+    if (receiptId == null || receiptId.isEmpty || _isScanning || !_isEditable) return;
+
+    if (_isBagCode(code)) {
+      await _validateAndSetBag(code);
+    } else {
+      await _linkPacketToPendingBag(code);
+    }
+  }
+
+  Future<void> _validateAndSetBag(String bagCode) async {
     if (_isBagScanned) {
-      _scanController.clear();
-      showDialog(
+      final confirmSwitch = await showDialog<bool>(
         context: context,
         builder: (ctx) => AlertDialog(
-          backgroundColor: const Color(0xFF1E3A5F),
-          title: const Text('Đổi mã bao?', style: TextStyle(color: kTextLight)),
+          backgroundColor: kProdOrderSurface,
+          title: const Text('Đổi mã bao?', style: TextStyle(color: Colors.white, fontSize: 16)),
           content: Text(
-            'Bao hiện tại: $_currentBagSerial\nĐã quét: $_currentBagPacketCount gói\n\nChuyển sang bao:\n$bagCode ?',
-            style: const TextStyle(color: kTextGray),
+            'Bao hiện tại: $_currentBagSerial\nChuyển sang kiểm tra bao:\n$bagCode ?',
+            style: const TextStyle(color: kProdOrderTextGray, fontSize: 13),
           ),
           actions: [
             TextButton(
-              onPressed: () { 
-                Navigator.pop(ctx); 
-                _refocus();
-              },
-              child: const Text('Huỷ', style: TextStyle(color: kTextGray)),
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('Hủy', style: TextStyle(color: kProdOrderTextGray)),
             ),
             ElevatedButton(
-              onPressed: () { Navigator.pop(ctx); _setBag(bagCode); },
-              style: ElevatedButton.styleFrom(backgroundColor: kPrimaryColor),
+              onPressed: () => Navigator.pop(ctx, true),
+              style: ElevatedButton.styleFrom(backgroundColor: kProdOrderPrimary),
               child: const Text('Xác nhận đổi', style: TextStyle(color: Colors.white)),
             ),
           ],
         ),
       );
-      return;
+      if (confirmSwitch != true || !mounted) return;
     }
-    _setBag(bagCode);
-  }
 
-  void _setBag(String bagCode) {
-    setState(() { _currentBagSerial = bagCode; _currentBagPacketCount = 0; });
-    HapticFeedback.mediumImpact();
-    _showSnack('📦 Bao $bagCode sẵn sàng — Quét gói để liên kết', isError: false);
-    _scanController.clear();
-    _refocus();
-  }
-
-  Future<void> _handlePacketScan(String packetCode) async {
-    if (!_isBagScanned) {
-      HapticFeedback.heavyImpact();
-      _showSnack('⚠️ Quét mã BAO trước (hậu tố -B)!', isError: true);
-      _scanController.clear();
-      _refocus();
-      return;
-    }
     setState(() => _isScanning = true);
-    final bagUsed = _currentBagSerial!;
     try {
-      // Bắt buộc dùng phiếu đóng bao (v6) — API cũ link-bag không cập nhật phiếu trên web
-      if (_receiptId == null) {
-        HapticFeedback.heavyImpact();
-        _showSnack('❌ Chưa có phiếu đóng bao. Tải lại màn hình hoặc kiểm tra trạng thái LSX.', isError: true);
-        return;
-      }
-      await ref.read(supplyRepositoryProvider).scanBagLinkV6(_receiptId!, packetCode, bagCode: bagUsed);
-      HapticFeedback.mediumImpact();
-      _showSnack('✅ Gói $packetCode → Bao $bagUsed', isError: false);
-      // 1 lần quét = gắn cả lô gói vào bao → xóa bao để quét bao tiếp theo
-      _clearBag();
-      await _loadData(silent: true);
-    } on DioException catch (e) {
-      HapticFeedback.heavyImpact();
-      final msg = e.response?.data?['message'] ?? 'Lỗi liên kết';
-      final statusCode = e.response?.statusCode ?? 0;
-      final msgLower = msg.toString().toLowerCase();
-      if (statusCode == 404 || msgLower.contains('không tồn tại') || msgLower.contains('not found') || msgLower.contains('bag_code')) {
-        final oldBag = _currentBagSerial;
-        _clearBag();
-        _showSnack('❌ Bao "$oldBag" không tồn tại. Gói chưa liên kết.', isError: true);
-      } else {
-        _showSnack('❌ $msg', isError: true);
-      }
+      final res = await ref
+          .read(supplyRepositoryProvider)
+          .validateBagForReceipt(_receiptId!, bagCode);
+      ScanFeedbackHelper.playSuccess();
+
+      final validatedSerial = (res['serial'] ?? bagCode).toString();
+      if (!mounted) return;
+      setState(() => _currentBagSerial = validatedSerial);
+
+      AppToast.info(context, 'Bao $validatedSerial hợp lệ — tiếp tục quét mã gói');
     } catch (e) {
-      _showSnack('❌ $e', isError: true);
+      ScanFeedbackHelper.playError();
+      final err = parseSupplyHttpError(e);
+      if (!mounted) return;
+
+      AppToast.error(context, err.message);
+      if (err.isBadRequest || err.isNotFound || err.isConflict) {
+        await _fetchBags();
+      }
     } finally {
-      setState(() => _isScanning = false);
-      _scanController.clear();
-      _refocus();
+      if (mounted) setState(() => _isScanning = false);
     }
   }
 
-  void _clearBag() {
-    setState(() { _currentBagSerial = null; _currentBagPacketCount = 0; });
+  Future<void> _linkPacketToPendingBag(String packetCode) async {
+    if (!_isBagScanned) {
+      ScanFeedbackHelper.playError();
+      AppToast.warning(context, 'Vui lòng quét mã BAO (-B) trước, sau đó quét mã gói.');
+      return;
+    }
+
+    final bagUsed = _currentBagSerial!;
+    setState(() => _isScanning = true);
+    try {
+      final res = await ref
+          .read(supplyRepositoryProvider)
+          .scanBagLinkV6(_receiptId!, packetCode, bagCode: bagUsed);
+      ScanFeedbackHelper.playSuccess();
+
+      if (!mounted) return;
+      final mappingMap = res['bagMapping'] is Map
+          ? Map<String, dynamic>.from(res['bagMapping'] as Map)
+          : null;
+      final totalsMap = res['receiptTotals'] is Map
+          ? Map<String, dynamic>.from(res['receiptTotals'] as Map)
+          : null;
+
+      setState(() {
+        if (mappingMap != null) {
+          final addedMapping = BagMapping.fromJson(mappingMap);
+          _bagMappings.removeWhere((b) => b.id == addedMapping.id || b.bagSerial == addedMapping.bagSerial);
+          _bagMappings.insert(0, addedMapping);
+        }
+        if (totalsMap != null) {
+          _totalBags = int.tryParse(totalsMap['totalBags']?.toString() ?? '') ?? _bagMappings.length;
+          _totalPackets = int.tryParse(totalsMap['totalPackets']?.toString() ?? '') ??
+              _bagMappings.fold<int>(0, (sum, b) => sum + b.packetCount);
+        } else {
+          _totalBags = _bagMappings.length;
+          _totalPackets = _bagMappings.fold<int>(0, (sum, b) => sum + b.packetCount);
+        }
+        // Hoàn tất 1 bao → xóa _currentBagSerial để sẵn sàng bao tiếp theo
+        _currentBagSerial = null;
+      });
+
+      final count = res['packetCount'] ?? mappingMap?['packetCount'] ?? '';
+      AppToast.success(
+        context,
+        'Đã đóng bao $bagUsed${count.toString().isNotEmpty ? ' ($count gói)' : ''}',
+      );
+    } catch (e) {
+      ScanFeedbackHelper.playError();
+      final err = parseSupplyHttpError(e);
+      if (!mounted) return;
+
+      AppToast.error(context, err.message);
+
+      // Giữ nguyên _currentBagSerial khi lỗi 400 (theo mục 5.7.4), chỉ xóa nếu đồng bộ phát hiện bao đã được đóng
+      if (err.isBadRequest || err.isNotFound || err.isConflict) {
+        await _fetchBags();
+      }
+    } finally {
+      if (mounted) setState(() => _isScanning = false);
+    }
   }
 
-  // ─── Camera Continuous Mode ───
-  void _openContinuousScanner() {
-    String? camBag;
-    bool isProcessing = false;
-    String scanPhase = 'bag'; // 'bag' or 'packet'
-
-    final camController = MobileScannerController(
-      detectionSpeed: DetectionSpeed.normal,
-      detectionTimeoutMs: 1500,
-    );
-
-    showModalBottomSheet(
-      context: context,
-      isScrollControlled: true,
-      isDismissible: false,
-      backgroundColor: Colors.transparent,
-      builder: (sheetCtx) => StatefulBuilder(
-        builder: (ctx, setSheetState) {
-          return Container(
-            height: MediaQuery.of(context).size.height * 0.78,
-            decoration: const BoxDecoration(
-              color: Colors.black,
-              borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
-            ),
-            child: Column(
-              children: [
-                const SizedBox(height: 8),
-                Container(width: 40, height: 4, decoration: BoxDecoration(color: Colors.white30, borderRadius: BorderRadius.circular(2))),
-
-                // Status header
-                Container(
-                  width: double.infinity,
-                  margin: const EdgeInsets.all(16),
-                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-                  decoration: BoxDecoration(
-                    color: scanPhase == 'bag' ? kWarningColor.withOpacity(0.15) : kPrimaryColor.withOpacity(0.15),
-                    borderRadius: BorderRadius.circular(12),
-                    border: Border.all(color: scanPhase == 'bag' ? kWarningColor.withOpacity(0.4) : kPrimaryColor.withOpacity(0.4)),
-                  ),
-                  child: Column(
-                    children: [
-                      Row(
-                        children: [
-                          Icon(
-                            scanPhase == 'bag' ? Icons.inventory_2 : Icons.qr_code,
-                            color: scanPhase == 'bag' ? kWarningColor : kPrimaryColor,
-                            size: 20,
-                          ),
-                          const SizedBox(width: 8),
-                          Text(
-                            scanPhase == 'bag' ? 'Bước 1: Quét mã BAO (-B)' : 'Bước 2: Quét mã GÓI',
-                            style: TextStyle(
-                              color: scanPhase == 'bag' ? kWarningColor : kPrimaryColor,
-                              fontWeight: FontWeight.bold,
-                              fontSize: 15,
-                            ),
-                          ),
-                        ],
-                      ),
-                      if (camBag != null) ...[
-                        const SizedBox(height: 6),
-                        Text(
-                          'Bao: $camBag',
-                          style: const TextStyle(color: Colors.white70, fontSize: 12),
-                        ),
-                      ],
-                    ],
-                  ),
-                ),
-
-                // Camera
-                Expanded(
-                  child: ClipRRect(
-                    borderRadius: BorderRadius.circular(12),
-                    child: MobileScanner(
-                      controller: camController,
-                      onDetect: (capture) async {
-                        if (isProcessing) return;
-                        for (final barcode in capture.barcodes) {
-                          final rawCode = barcode.rawValue;
-                          if (rawCode == null || rawCode.isEmpty) continue;
-                          final code = _extractCode(rawCode);
-
-                          if (scanPhase == 'bag') {
-                            // Expect bag code
-                            if (!_isBagCode(code)) {
-                              HapticFeedback.heavyImpact();
-                              if (ctx.mounted) {
-                                ScaffoldMessenger.of(ctx).showSnackBar(SnackBar(
-                                  content: const Text('⚠️ Đây là mã gói! Quét mã BAO trước (-B)'),
-                                  backgroundColor: Colors.red.shade700,
-                                  duration: const Duration(seconds: 2),
-                                ));
-                              }
-                              return;
-                            }
-                            camBag = code;
-                            setSheetState(() => scanPhase = 'packet');
-                            HapticFeedback.mediumImpact();
-                            return;
-                          }
-
-                          if (scanPhase == 'packet') {
-                            if (_isBagCode(code)) {
-                              // User scanned another bag, switch
-                              camBag = code;
-                              setSheetState(() {});
-                              HapticFeedback.mediumImpact();
-                              return;
-                            }
-                            // Process packet
-                            isProcessing = true;
-                            try {
-                              if (_receiptId == null) {
-                                throw Exception('Chưa có phiếu đóng bao. Tải lại màn hình.');
-                              }
-                              await ref.read(supplyRepositoryProvider).scanBagLinkV6(_receiptId!, code, bagCode: camBag!);
-                              HapticFeedback.mediumImpact();
-                              final linkedBag = camBag!;
-                              final linkedPacket = code;
-
-                              // Close camera — 1 lần quét = gắn cả lô vào bao
-                              camController.dispose();
-                              if (sheetCtx.mounted) Navigator.pop(sheetCtx);
-
-                              await _loadData();
-
-                              if (mounted) {
-                                _showSuccessOverlay(linkedBag, linkedPacket);
-                              }
-                            } catch (e) {
-                              HapticFeedback.heavyImpact();
-                              String errMsg = 'Lỗi';
-                              if (e is DioException) {
-                                errMsg = e.response?.data?['message']?.toString() ?? 'Lỗi liên kết';
-                              }
-                              if (ctx.mounted) {
-                                ScaffoldMessenger.of(ctx).showSnackBar(SnackBar(
-                                  content: Text('❌ $errMsg'),
-                                  backgroundColor: Colors.red.shade700,
-                                  duration: const Duration(seconds: 2),
-                                ));
-                              }
-                              // Stay in packet phase to retry
-                            } finally {
-                              isProcessing = false;
-                            }
-                            return;
-                          }
-                        }
-                      },
-                    ),
-                  ),
-                ),
-
-                // Close button
-                Padding(
-                  padding: const EdgeInsets.all(20),
-                  child: SizedBox(
-                    width: double.infinity,
-                    child: ElevatedButton.icon(
-                      onPressed: () {
-                        camController.dispose();
-                        Navigator.pop(sheetCtx);
-                        _loadData(); // Reload data after closing
-                      },
-                      icon: const Icon(Icons.close, color: Colors.white),
-                      label: const Text('Đóng camera', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: Colors.red.shade700,
-                        padding: const EdgeInsets.symmetric(vertical: 14),
-                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                      ),
-                    ),
-                  ),
-                ),
-              ],
-            ),
-          );
-        },
-      ),
-    );
-  }
-
-  void _showSuccessOverlay(String bagCode, String packetCode) {
-    showDialog(
-      context: context,
-      barrierDismissible: true,
-      builder: (ctx) {
-        // Auto-dismiss after 2.5 seconds
-        Future.delayed(const Duration(milliseconds: 2500), () {
-          if (ctx.mounted) Navigator.of(ctx).pop();
-        });
-
-        return Dialog(
-          backgroundColor: Colors.transparent,
-          child: Container(
-            padding: const EdgeInsets.all(28),
-            decoration: BoxDecoration(
-              color: const Color(0xFF1E3A5F),
-              borderRadius: BorderRadius.circular(20),
-              border: Border.all(color: kPrimaryColor.withOpacity(0.5), width: 2),
-              boxShadow: [
-                BoxShadow(color: kPrimaryColor.withOpacity(0.3), blurRadius: 24, spreadRadius: 2),
-              ],
-            ),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Container(
-                  padding: const EdgeInsets.all(16),
-                  decoration: BoxDecoration(
-                    color: kPrimaryColor.withOpacity(0.15),
-                    shape: BoxShape.circle,
-                  ),
-                  child: const Icon(Icons.check_circle, color: kPrimaryColor, size: 48),
-                ),
-                const SizedBox(height: 16),
-                const Text(
-                  'Ghép bao thành công!',
-                  style: TextStyle(color: kTextLight, fontSize: 18, fontWeight: FontWeight.bold),
-                ),
-                const SizedBox(height: 12),
-                Container(
-                  padding: const EdgeInsets.all(12),
-                  decoration: BoxDecoration(
-                    color: Colors.black.withOpacity(0.2),
-                    borderRadius: BorderRadius.circular(10),
-                  ),
-                  child: Column(
-                    children: [
-                      Row(
-                        children: [
-                          const Icon(Icons.inventory_2, color: kWarningColor, size: 16),
-                          const SizedBox(width: 8),
-                          Expanded(
-                            child: Text(
-                              'Bao: $bagCode',
-                              style: const TextStyle(color: kTextLight, fontSize: 13, fontWeight: FontWeight.w600),
-                              overflow: TextOverflow.ellipsis,
-                            ),
-                          ),
-                        ],
-                      ),
-                      const SizedBox(height: 6),
-                      Row(
-                        children: [
-                          const Icon(Icons.qr_code, color: kPrimaryColor, size: 16),
-                          const SizedBox(width: 8),
-                          Expanded(
-                            child: Text(
-                              'Gói: $packetCode',
-                              style: const TextStyle(color: kTextLight, fontSize: 13, fontWeight: FontWeight.w600),
-                              overflow: TextOverflow.ellipsis,
-                            ),
-                          ),
-                        ],
-                      ),
-                    ],
-                  ),
-                ),
-                const SizedBox(height: 16),
-                Text(
-                  'Bấm nút Scan để ghép bao tiếp',
-                  style: TextStyle(color: kTextGray, fontSize: 12),
-                ),
-              ],
-            ),
-          ),
-        );
-      },
-    );
-  }
-
-  Future<void> _showCompleteOrderDialog() async {
-    bool refundUnused = true;
+  Future<void> _confirmRemoveBag(BagMapping bag) async {
+    if (_receiptId == null || !_isEditable) return;
     final confirmed = await showDialog<bool>(
       context: context,
-      builder: (ctx) => StatefulBuilder(
-        builder: (context, setDialogState) {
-          return AlertDialog(
-            backgroundColor: kBackgroundDark,
-            title: const Text('Chốt Lệnh Sản Xuất', style: TextStyle(color: kTextLight)),
-            content: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                const Text(
-                  'Thao tác này sẽ chốt lệnh sản xuất. Bạn có đồng ý chốt lệnh?',
-                  style: TextStyle(color: kTextGray, fontSize: 14),
-                ),
-                const SizedBox(height: 16),
-                Row(
-                  children: [
-                    Theme(
-                      data: ThemeData(unselectedWidgetColor: kTextGray),
-                      child: Checkbox(
-                        value: refundUnused,
-                        activeColor: kPrimaryColor,
-                        onChanged: (val) {
-                          if (val != null) {
-                            setDialogState(() => refundUnused = val);
-                          }
-                        },
-                      ),
-                    ),
-                    const Expanded(
-                      child: Text(
-                        'Hoàn trả lại nguyên liệu thừa chưa đóng hết về tồn kho gốc',
-                        style: TextStyle(color: kTextLight, fontSize: 13),
-                      ),
-                    ),
-                  ],
-                ),
-              ],
-            ),
-            actions: [
-              TextButton(
-                onPressed: () => Navigator.pop(ctx, false),
-                child: const Text('Hủy', style: TextStyle(color: kTextGray)),
-              ),
-              ElevatedButton(
-                onPressed: () => Navigator.pop(ctx, true),
-                style: ElevatedButton.styleFrom(backgroundColor: kPrimaryColor),
-                child: const Text('Xác nhận chốt', style: TextStyle(color: Colors.white)),
-              ),
-            ],
-          );
-        }
-      ),
-    );
-
-    if (confirmed == true) {
-      setState(() => _isLoading = true);
-      try {
-        await ref.read(supplyRepositoryProvider).completeProductionOrder(widget.orderId, refundUnused: refundUnused);
-        _showSnack('✅ Chốt lệnh sản xuất thành công', isError: false);
-        await _loadData();
-      } on DioException catch (e) {
-        final msg = e.response?.data?['message']?.toString() ?? 'Chốt lệnh thất bại';
-        _showSnack('❌ $msg', isError: true);
-        setState(() => _isLoading = false);
-      } catch (e) {
-        _showSnack('❌ Lỗi: $e', isError: true);
-        setState(() => _isLoading = false);
-      }
-    }
-  }
-
-  Future<void> _showCancelOrderDialog() async {
-    bool cancelConfirmed = false;
-    final confirmed = await showDialog<bool>(
-      context: context,
-      builder: (ctx) => StatefulBuilder(
-        builder: (context, setDialogState) {
-          return AlertDialog(
-            backgroundColor: kBackgroundDark,
-            title: const Text('⚠️ Hủy Lệnh Sản Xuất', style: TextStyle(color: Colors.redAccent)),
-            content: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Container(
-                  padding: const EdgeInsets.all(10),
-                  decoration: BoxDecoration(
-                    color: Colors.red.withOpacity(0.1),
-                    borderRadius: BorderRadius.circular(8),
-                    border: Border.all(color: Colors.red.withOpacity(0.3)),
-                  ),
-                  child: const Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        'Thao tác này không thể hoàn tác!',
-                        style: TextStyle(color: Colors.redAccent, fontWeight: FontWeight.bold, fontSize: 13),
-                      ),
-                      SizedBox(height: 6),
-                      Text(
-                        '• Toàn bộ mã gói và mã bao đã sinh sẽ bị xóa vĩnh viễn\n'
-                        '• Các phiếu sản xuất liên quan sẽ bị đóng\n'
-                        '• Không thể hủy nếu đã có lô được liên kết bao',
-                        style: TextStyle(color: kTextGray, fontSize: 12, height: 1.4),
-                      ),
-                    ],
-                  ),
-                ),
-                const SizedBox(height: 16),
-                Row(
-                  children: [
-                    Theme(
-                      data: ThemeData(unselectedWidgetColor: kTextGray),
-                      child: Checkbox(
-                        value: cancelConfirmed,
-                        activeColor: Colors.redAccent,
-                        onChanged: (val) {
-                          if (val != null) {
-                            setDialogState(() => cancelConfirmed = val);
-                          }
-                        },
-                      ),
-                    ),
-                    const Expanded(
-                      child: Text(
-                        'Tôi đã đọc kỹ và đồng ý hủy lệnh sản xuất',
-                        style: TextStyle(color: kTextLight, fontSize: 13),
-                      ),
-                    ),
-                  ],
-                ),
-              ],
-            ),
-            actions: [
-              TextButton(
-                onPressed: () => Navigator.pop(ctx, false),
-                child: const Text('Hủy', style: TextStyle(color: kTextGray)),
-              ),
-              ElevatedButton(
-                onPressed: cancelConfirmed ? () => Navigator.pop(ctx, true) : null,
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: Colors.redAccent,
-                  disabledBackgroundColor: Colors.grey.withOpacity(0.3),
-                ),
-                child: const Text('Xác nhận Hủy Lệnh', style: TextStyle(color: Colors.white)),
-              ),
-            ],
-          );
-        }
-      ),
-    );
-
-    if (confirmed == true) {
-      setState(() => _isLoading = true);
-      try {
-        await ref.read(supplyRepositoryProvider).cancelProductionOrder(widget.orderId);
-        _showSnack('⚠️ Đã hủy lệnh sản xuất thành công', isError: false);
-        await _loadData();
-      } on DioException catch (e) {
-        final msg = e.response?.data?['message']?.toString() ?? 'Hủy lệnh thất bại';
-        _showSnack('❌ $msg', isError: true);
-        setState(() => _isLoading = false);
-      } catch (e) {
-        _showSnack('❌ Lỗi: $e', isError: true);
-        setState(() => _isLoading = false);
-      }
-    }
-  }
-
-  Widget _buildOrderOperationsBox() {
-    if (!['APPROVED', 'CODES_READY', 'IN_PROGRESS'].contains(_orderStatus)) {
-      return const SizedBox.shrink();
-    }
-    return Container(
-      margin: const EdgeInsets.fromLTRB(16, 12, 16, 0),
-      padding: const EdgeInsets.all(12),
-      decoration: BoxDecoration(
-        color: kSurfaceDark,
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: Colors.white.withOpacity(0.1)),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          const Row(
-            children: [
-              Icon(Icons.precision_manufacturing, color: Colors.blueAccent, size: 18),
-              SizedBox(width: 8),
-              Text(
-                'Thao tác Lệnh sản xuất',
-                style: TextStyle(color: kTextLight, fontWeight: FontWeight.bold, fontSize: 14),
-              ),
-            ],
+      builder: (ctx) => AlertDialog(
+        backgroundColor: kProdOrderSurface,
+        title: const Text('Xóa bao khỏi phiếu?', style: TextStyle(color: Colors.redAccent, fontSize: 16)),
+        content: Text(
+          'Hủy liên kết bao ${bag.bagSerial} (${bag.packetCount} gói) khỏi phiếu $_receiptCode?',
+          style: const TextStyle(color: kProdOrderTextSub, fontSize: 13),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Quay lại', style: TextStyle(color: kProdOrderTextGray)),
           ),
-          const SizedBox(height: 12),
-          Row(
-            children: [
-              Expanded(
-                child: ElevatedButton.icon(
-                  onPressed: _showCompleteOrderDialog,
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: kPrimaryColor,
-                    foregroundColor: Colors.white,
-                    padding: const EdgeInsets.symmetric(vertical: 12),
-                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
-                  ),
-                  icon: const Icon(Icons.check_circle_outline, size: 18),
-                  label: const Text('Chốt Lệnh', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13)),
-                ),
-              ),
-              const SizedBox(width: 10),
-              Expanded(
-                child: ElevatedButton.icon(
-                  onPressed: _showCancelOrderDialog,
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: Colors.red.shade700,
-                    foregroundColor: Colors.white,
-                    padding: const EdgeInsets.symmetric(vertical: 12),
-                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
-                  ),
-                  icon: const Icon(Icons.cancel_outlined, size: 18),
-                  label: const Text('Hủy Lệnh', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13)),
-                ),
-              ),
-            ],
+          ElevatedButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            style: ElevatedButton.styleFrom(backgroundColor: Colors.redAccent),
+            child: const Text('Xóa bao', style: TextStyle(color: Colors.white)),
           ),
         ],
       ),
     );
+    if (confirmed != true || !mounted) return;
+
+    try {
+      final res = await ref
+          .read(supplyRepositoryProvider)
+          .removeBagFromReceipt(_receiptId!, bag.id);
+      if (!mounted) return;
+      final totalsMap = res['receiptTotals'] is Map
+          ? Map<String, dynamic>.from(res['receiptTotals'] as Map)
+          : null;
+      setState(() {
+        _bagMappings.removeWhere((b) => b.id == bag.id);
+        _totalBags = int.tryParse(totalsMap?['totalBags']?.toString() ?? '') ?? _bagMappings.length;
+        _totalPackets = int.tryParse(totalsMap?['totalPackets']?.toString() ?? '') ??
+            _bagMappings.fold<int>(0, (sum, b) => sum + b.packetCount);
+      });
+      AppToast.info(context, 'Đã xóa bao ${bag.bagSerial} khỏi phiếu.');
+    } catch (e) {
+      if (mounted) AppToast.error(context, parseSupplyHttpError(e).message);
+      await _fetchBags();
+    }
   }
 
-  void _showSnack(String msg, {required bool isError}) {
-    if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-      content: Text(msg),
-      backgroundColor: isError ? Colors.red.shade700 : kPrimaryColor,
-      duration: const Duration(seconds: 2),
-    ));
+  Future<void> _openPacketDetail(BagMapping bag) async {
+    await showBagPacketDetailSheet(
+      context,
+      bag: bag,
+      canReplace: _canReplace,
+      onTapReplaceSerial: (damagedSerial) => _openReplaceSheet(prefillSerial: damagedSerial),
+    );
   }
 
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      backgroundColor: kBackgroundDark,
-      appBar: AppBar(
-        title: Column(
+  Future<void> _openReplaceSheet({String? prefillSerial}) async {
+    if (_receiptId == null || !_canReplace) return;
+    final replaced = await showReplacePacketSheet(
+      context,
+      receiptId: _receiptId!,
+      prefillDamagedSerial: prefillSerial,
+    );
+    if (replaced == true && mounted) {
+      await _fetchBags();
+    }
+  }
+
+  Future<void> _onTapCompleteReceipt() async {
+    if (_receiptId == null) return;
+    if (_bagMappings.isEmpty && _totalBags == 0) {
+      AppToast.warning(context, 'Phiếu chưa có bao nào. Vui lòng quét ít nhất 1 bao.');
+      return;
+    }
+
+    final confirmed = await showDialog<bool>(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: kProdOrderSurface,
+        title: Text(
+          'Lưu phiếu $_receiptCode & Nhập kho',
+          style: const TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.bold),
+        ),
+        content: Text(
+          'Xác nhận nhập kho $_totalBags bao ($_totalPackets gói) vào kho ${_warehouseName.isNotEmpty ? _warehouseName : 'đã chọn'}?\n\nLệnh SX vẫn mở để tạo thêm phiếu mới nếu cần.',
+          style: const TextStyle(color: kProdOrderTextSub, fontSize: 13, height: 1.4),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Hủy', style: TextStyle(color: kProdOrderTextGray)),
+          ),
+          ElevatedButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            style: ElevatedButton.styleFrom(backgroundColor: kProdOrderPrimary),
+            child: const Text('Lưu & Nhập kho', style: TextStyle(color: Colors.white)),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+
+    setState(() => _isSubmittingAction = true);
+    try {
+      await ref.read(supplyRepositoryProvider).completeReceipt(_receiptId!);
+      OrderListScreen.clearStaticCache();
+      if (!mounted) return;
+      AppToast.success(context, 'Đã lưu phiếu đóng bao và nhập kho.');
+      Navigator.of(context).pop(true);
+    } catch (e) {
+      if (mounted) {
+        setState(() => _isSubmittingAction = false);
+        AppToast.error(context, parseSupplyHttpError(e).message);
+      }
+    }
+  }
+
+  Future<void> _onTapCancelReceipt() async {
+    if (_receiptId == null || !_isEditable) return;
+    final reasonCtrl = TextEditingController();
+    final confirmed = await showDialog<bool>(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: kProdOrderSurface,
+        title: Text(
+          'Hủy phiếu $_receiptCode',
+          style: const TextStyle(color: Colors.redAccent, fontSize: 16, fontWeight: FontWeight.bold),
+        ),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            const Text('Đóng Bao', style: TextStyle(color: kTextLight, fontSize: 16)),
-            if (_orderCode.isNotEmpty)
-              Text('$_orderCode — $_productName', style: const TextStyle(color: kTextGray, fontSize: 12)),
+            const Text(
+              'Hủy phiếu sẽ tách toàn bộ bao đã quét khỏi phiếu này về trạng thái khả dụng.',
+              style: TextStyle(color: kProdOrderTextSub, fontSize: 12.5, height: 1.35),
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: reasonCtrl,
+              style: const TextStyle(color: Colors.white, fontSize: 13),
+              maxLines: 2,
+              decoration: prodOrderInputDeco('Lý do hủy phiếu (tùy chọn)'),
+            ),
           ],
         ),
-        backgroundColor: kBackgroundDark,
-        elevation: 0,
-        iconTheme: const IconThemeData(color: kTextGray),
         actions: [
-          IconButton(icon: const Icon(Icons.refresh, color: kTextGray), onPressed: _loadData),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Quay lại', style: TextStyle(color: kProdOrderTextGray)),
+          ),
+          ElevatedButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            style: ElevatedButton.styleFrom(backgroundColor: Colors.redAccent),
+            child: const Text('Xác nhận hủy', style: TextStyle(color: Colors.white)),
+          ),
         ],
       ),
-      body: _isLoading
-          ? const Center(child: CircularProgressIndicator(color: kPrimaryColor))
-          : SingleChildScrollView(
-              child: Column(
-                children: [
-                  if (_isBagScanned) _buildCurrentBagBanner(),
-                  _buildReceiptInfoBox(),
-                  _buildOrderOperationsBox(),
-                  _buildScanInput(),
-                  _buildStats(),
-                  _buildBagList(),
-                ],
-              ),
-            ),
-      bottomNavigationBar: _buildBottomBar(),
     );
+    if (confirmed != true || !mounted) return;
+
+    setState(() => _isSubmittingAction = true);
+    try {
+      await ref.read(supplyRepositoryProvider).cancelReceipt(
+            _receiptId!,
+            reason: reasonCtrl.text.trim(),
+          );
+      OrderListScreen.clearStaticCache();
+      if (!mounted) return;
+      AppToast.warning(context, 'Đã hủy phiếu $_receiptCode.');
+      Navigator.of(context).pop(true);
+    } catch (e) {
+      if (mounted) {
+        setState(() => _isSubmittingAction = false);
+        AppToast.error(context, parseSupplyHttpError(e).message);
+      }
+    }
   }
 
   Future<void> _showCameraScanner() async {
+    if (!_isEditable) return;
     final String? result = await Navigator.push<String>(
       context,
       MaterialPageRoute(
         builder: (context) => ScannerScreen(
           title: _isBagScanned ? 'Quét mã gói' : 'Quét mã bao',
-          returnCode: true,
+          isWarehouseMode: true,
         ),
       ),
     );
 
     if (result != null && result.isNotEmpty && mounted) {
-      _scanController.text = result;
-      _handleScan();
+      final code = extractSerialCodeFromQr(result);
+      if (code.isNotEmpty) {
+        await _processScan(code);
+      }
     }
+    _refocus();
   }
 
-  Widget _buildBottomBar() {
-    return Container(
-      padding: EdgeInsets.fromLTRB(16, 10, 16, MediaQuery.of(context).padding.bottom + 10),
-      decoration: BoxDecoration(
-        color: kBackgroundDark,
-        border: Border(top: BorderSide(color: Colors.white.withOpacity(0.08))),
-      ),
-      child: Row(
-        children: [
-          Expanded(
-            flex: 4,
-            child: SizedBox(
-              height: 52,
-              child: OutlinedButton(
-                onPressed: () => Navigator.of(context).pop(),
-                style: OutlinedButton.styleFrom(
-                  foregroundColor: kTextLight,
-                  side: BorderSide(color: Colors.white.withOpacity(0.2)),
-                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
-                ),
-                child: const Text('Quay lại', style: TextStyle(fontWeight: FontWeight.w700)),
+  @override
+  Widget build(BuildContext context) {
+    final orderCode = _order?.orderCode ?? '';
+    final productName = _order?.productName ?? '';
+
+    return Scaffold(
+      backgroundColor: kProdOrderBg,
+      appBar: AppBar(
+        titleSpacing: 0,
+        title: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            FittedBox(
+              fit: BoxFit.scaleDown,
+              alignment: Alignment.centerLeft,
+              child: Text(
+                _receiptCode.isNotEmpty ? 'Đóng Bao • $_receiptCode' : 'Đóng Bao',
+                style: const TextStyle(color: Colors.white, fontSize: 15.5, fontWeight: FontWeight.bold),
               ),
             ),
-          ),
-          const SizedBox(width: 12),
-          Expanded(
-            flex: 5,
-            child: SizedBox(
-              height: 52,
-              child: ElevatedButton(
-                onPressed: _showCameraScanner,
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: kPrimaryColor,
-                  foregroundColor: Colors.white,
-                  padding: EdgeInsets.zero,
-                  elevation: 8,
-                  shadowColor: kPrimaryColor.withOpacity(0.5),
-                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+            if (orderCode.isNotEmpty)
+              FittedBox(
+                fit: BoxFit.scaleDown,
+                alignment: Alignment.centerLeft,
+                child: Text(
+                  '$orderCode${productName.isNotEmpty ? ' — $productName' : ''}',
+                  style: const TextStyle(color: kProdOrderTextGray, fontSize: 12),
                 ),
+              ),
+          ],
+        ),
+        backgroundColor: kProdOrderBg,
+        elevation: 0,
+        iconTheme: const IconThemeData(color: kProdOrderTextGray),
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.refresh, color: kProdOrderTextGray),
+            onPressed: _fetchBags,
+          ),
+        ],
+      ),
+      body: _isLoading
+          ? const Center(child: CircularProgressIndicator(color: kProdOrderPrimary))
+          : RefreshIndicator(
+              onRefresh: _fetchBags,
+              color: kProdOrderPrimary,
+              child: SingleChildScrollView(
+                physics: const AlwaysScrollableScrollPhysics(),
+                keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
                 child: Column(
-                  mainAxisAlignment: MainAxisAlignment.center,
                   children: [
-                    const Icon(Icons.qr_code_scanner, size: 20),
-                    const SizedBox(height: 2),
-                    Text(_isBagScanned ? 'Quét gói' : 'Quét bao', style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w800)),
+                    if (_isBagScanned)
+                      BagLinkingCurrentBagBanner(
+                        currentBagSerial: _currentBagSerial!,
+                        currentBagPacketCount: 0,
+                        onClearBag: () => setState(() => _currentBagSerial = null),
+                      ),
+                    _buildReceiptInfoBox(),
+                    if (_isEditable) _buildScanInputCard(),
+                    BagLinkingStatsRow(
+                      totalBags: _totalBags,
+                      linkedCount: _bagMappings.where((b) => (b.lotStatus ?? '') == 'LINKED').length,
+                      totalPackets: _totalPackets,
+                      onTapReplacePacket: _canReplace ? () => _openReplaceSheet() : null,
+                    ),
+                    const SizedBox(height: 8),
+                    _buildBagList(),
                   ],
                 ),
               ),
             ),
-          ),
-          const SizedBox(width: 12),
-          Expanded(
-            flex: 4,
-            child: SizedBox(
-              height: 52,
-              child: ElevatedButton(
-                onPressed: () async {
-                  if (_receiptId == null) {
-                    _showSnack('❌ Chưa có phiếu đóng bao — dữ liệu chưa gắn với web', isError: true);
-                    return;
-                  }
-                  if (_selectedWarehouseId == null || _selectedWarehouseId!.isEmpty) {
-                    _showSnack('❌ Vui lòng chọn kho lưu trước khi hoàn thành', isError: true);
-                    return;
-                  }
-                  if (_bagMappings.isEmpty) {
-                    _showSnack('Vui lòng quét bao trước', isError: true);
-                    return;
-                  }
-
-                  try {
-                    // Lưu và hoàn thành phiếu đóng bao
-                    await ref.read(supplyRepositoryProvider).completeReceipt(_receiptId!);
-                    _showSnack('✅ Đã lưu và hoàn thành đóng bao', isError: false);
-                    if (mounted) Navigator.of(context).pop();
-                  } on DioException catch (e) {
-                    final msg = e.response?.data?['message']?.toString() ?? 'Lưu thất bại';
-                    _showSnack('❌ $msg', isError: true);
-                  } catch (e) {
-                    _showSnack('❌ Lưu thất bại: $e', isError: true);
-                  }
-                },
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: kPrimaryColor,
-                  foregroundColor: Colors.white,
-                  padding: EdgeInsets.zero,
-                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
-                ),
-                child: const Text('Lưu lại', textAlign: TextAlign.center, style: TextStyle(fontWeight: FontWeight.w700, fontSize: 14, height: 1.2)),
-              ),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildBottomBtn(IconData icon, String label, Color color, VoidCallback onTap) {
-    return InkWell(
-      onTap: onTap,
-      child: Column(
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: [
-          Icon(icon, color: color, size: 24),
-          const SizedBox(height: 4),
-          Text(label, style: TextStyle(fontSize: 10, fontWeight: FontWeight.w600, color: color)),
-        ],
-      ),
+      bottomNavigationBar: MediaQuery.of(context).viewInsets.bottom > 0 || !_isEditable
+          ? null
+          : _buildBottomBar(),
     );
   }
 
   Widget _buildReceiptInfoBox() {
-    if (_receiptCode.isEmpty) return const SizedBox.shrink();
-    
+    final statusColor = prodOrderStatusColor(_receiptStatus);
+    final statusLabel = _receiptStatus == 'COMPLETED'
+        ? 'Đã lưu & nhập kho'
+        : (_receiptStatus == 'CANCELLED' ? 'Đã hủy' : 'Đang đóng bao');
+    final canEditWarehouse = _isEditable && _bagMappings.isEmpty && _totalBags == 0;
+
     return Container(
-      margin: const EdgeInsets.fromLTRB(16, 16, 16, 0),
+      margin: const EdgeInsets.fromLTRB(16, 12, 16, 10),
       padding: const EdgeInsets.all(12),
       decoration: BoxDecoration(
-        color: kSurfaceDark,
+        color: kProdOrderSurface,
         borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: Colors.white.withOpacity(0.1)),
+        border: Border.all(color: Colors.white.withValues(alpha: 0.08)),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
-              Row(
-                children: [
-                  const Icon(Icons.receipt_long, color: kPrimaryColor, size: 18),
-                  const SizedBox(width: 8),
-                  Text(_receiptCode, style: const TextStyle(color: kTextLight, fontWeight: FontWeight.bold, fontSize: 14)),
-                ],
+              const Icon(Icons.receipt_long, color: kProdOrderPrimaryLight, size: 18),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  _receiptCode.isNotEmpty ? _receiptCode : 'Phiếu đóng bao',
+                  style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 14),
+                ),
               ),
               Container(
-                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
                 decoration: BoxDecoration(
-                  color: _receiptStatus == 'COMPLETED' ? Colors.green.withOpacity(0.2) : kWarningColor.withOpacity(0.2),
+                  color: statusColor.withValues(alpha: 0.18),
                   borderRadius: BorderRadius.circular(6),
                 ),
                 child: Text(
-                  _receiptStatus == 'COMPLETED' ? 'Đã hoàn thành' : 'Đang đóng gói',
-                  style: TextStyle(
-                    color: _receiptStatus == 'COMPLETED' ? Colors.green : kWarningColor,
-                    fontSize: 11,
-                    fontWeight: FontWeight.w600,
-                  ),
+                  statusLabel,
+                  style: TextStyle(color: statusColor, fontSize: 11, fontWeight: FontWeight.w600),
                 ),
               ),
             ],
           ),
-          const SizedBox(height: 12),
-          const Divider(height: 1, color: Colors.white10),
-          const SizedBox(height: 12),
+          const Divider(height: 18, color: Colors.white10),
           Row(
             children: [
-              Expanded(child: _buildInfoItem('Thời gian', _receiptTime, Icons.access_time)),
-              Expanded(child: _buildInfoItem('Người đóng', _receiptUser, Icons.person_outline)),
+              Expanded(child: _infoCol('Thời gian', _receiptTime)),
+              Expanded(child: _infoCol('Người đóng', _receiptUser)),
             ],
           ),
-          const SizedBox(height: 12),
-          Theme(
-            data: Theme.of(context).copyWith(
-              inputDecorationTheme: const InputDecorationTheme(
-                isDense: true,
-                contentPadding: EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-              ),
-            ),
-            child: WarehouseSelector(
-              label: 'Kho lưu (bắt buộc)',
+          const SizedBox(height: 10),
+          if (canEditWarehouse)
+            WarehouseSelector(
+              label: 'Kho lưu (cố định khi bắt đầu quét)',
               selectedId: _selectedWarehouseId,
               onChanged: (val) async {
-                if (_receiptStatus == 'COMPLETED') {
-                  _showSnack('❌ Phiếu đã hoàn thành, không thể sửa', isError: true);
-                  return;
-                }
+                if (val == null || _receiptId == null) return;
                 setState(() => _selectedWarehouseId = val);
-                if (_receiptId != null && val != null) {
-                  try {
-                    await ref.read(supplyRepositoryProvider).updateReceiptWarehouse(_receiptId!, val);
-                  } catch (e) {
-                    _showSnack('❌ Lỗi cập nhật kho lưu', isError: true);
-                  }
+                try {
+                  await ref.read(supplyRepositoryProvider).updateReceiptWarehouse(_receiptId!, val);
+                } catch (e) {
+                  if (mounted) AppToast.error(context, parseSupplyHttpError(e).message);
                 }
               },
+            )
+          else
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+              decoration: BoxDecoration(
+                color: kProdOrderBg,
+                borderRadius: BorderRadius.circular(10),
+                border: Border.all(color: Colors.white.withValues(alpha: 0.08)),
+              ),
+              child: Row(
+                children: [
+                  const Icon(Icons.warehouse_outlined, color: kProdOrderTextGray, size: 16),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      'Kho nhập: ${_warehouseName.isNotEmpty ? _warehouseName : 'Theo kho Lệnh SX'}',
+                      style: const TextStyle(color: kProdOrderTextSub, fontSize: 12.5, fontWeight: FontWeight.w500),
+                    ),
+                  ),
+                  const Icon(Icons.lock_outline, color: kProdOrderTextGray, size: 14),
+                ],
+              ),
             ),
-          ),
         ],
       ),
     );
   }
 
-  Widget _buildInfoItem(String label, String value, IconData icon) {
-    return Row(
+  Widget _infoCol(String label, String value) {
+    return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Icon(icon, size: 14, color: kTextGray),
-        const SizedBox(width: 6),
-        Expanded(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(label, style: const TextStyle(color: kTextGray, fontSize: 11)),
-              const SizedBox(height: 2),
-              Text(value.isNotEmpty ? value : '--', style: const TextStyle(color: kTextLight, fontSize: 13, fontWeight: FontWeight.w500)),
-            ],
-          ),
+        Text(label, style: const TextStyle(color: kProdOrderTextGray, fontSize: 11)),
+        const SizedBox(height: 2),
+        Text(
+          value.isNotEmpty ? value : '—',
+          style: const TextStyle(color: Colors.white, fontSize: 12.5, fontWeight: FontWeight.w500),
+          overflow: TextOverflow.ellipsis,
         ),
       ],
     );
   }
 
-  Widget _buildCurrentBagBanner() {
+  Widget _buildScanInputCard() {
     return Container(
-      margin: const EdgeInsets.fromLTRB(16, 16, 16, 0),
-      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-      decoration: BoxDecoration(
-        color: kPrimaryColor.withOpacity(0.12),
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: kPrimaryColor.withOpacity(0.4)),
-      ),
-      child: Row(
-        children: [
-          const Icon(Icons.inventory_2, color: kPrimaryColor, size: 20),
-          const SizedBox(width: 10),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text('Bao: $_currentBagSerial', style: const TextStyle(color: kPrimaryColor, fontWeight: FontWeight.bold, fontSize: 14)),
-                Text('Đã quét $_currentBagPacketCount gói', style: TextStyle(color: kPrimaryColor.withOpacity(0.7), fontSize: 11)),
-              ],
-            ),
-          ),
-          IconButton(
-            onPressed: _clearBag,
-            icon: const Icon(Icons.close, color: kPrimaryColor, size: 18),
-            constraints: const BoxConstraints(minWidth: 36, minHeight: 36),
-            padding: EdgeInsets.zero,
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildScanInput() {
-    return Container(
-      margin: const EdgeInsets.all(16),
+      margin: const EdgeInsets.fromLTRB(16, 0, 16, 10),
       padding: const EdgeInsets.all(12),
       decoration: BoxDecoration(
-        color: kSurfaceDark,
+        color: kProdOrderSurface,
         borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: Colors.white.withOpacity(0.1)),
+        border: Border.all(color: Colors.white.withValues(alpha: 0.08)),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -1240,26 +846,33 @@ class _BagLinkingScreenState extends ConsumerState<BagLinkingScreen> {
             children: [
               Expanded(
                 child: Text(
-                  _isBagScanned ? '📦 Bước 2: Quét mã gói để liên kết' : '🏷️ Bước 1: Quét mã bao (hậu tố -B)',
-                  style: const TextStyle(color: kTextGray, fontSize: 12, fontWeight: FontWeight.w600),
+                  _isBagScanned
+                      ? 'Bước 2: Quét mã GÓI liên kết vào $_currentBagSerial'
+                      : 'Bước 1: Quét mã BAO (-B)',
+                  style: TextStyle(
+                    color: _isBagScanned ? kProdOrderPrimaryLight : kProdOrderAmber,
+                    fontSize: 12,
+                    fontWeight: FontWeight.bold,
+                  ),
                   overflow: TextOverflow.ellipsis,
                 ),
               ),
-              const SizedBox(width: 8),
               Row(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  const Text('Ẩn bàn phím', style: TextStyle(color: kTextGray, fontSize: 11)),
+                  const Text('Ẩn bàn phím', style: TextStyle(color: kProdOrderTextGray, fontSize: 11)),
                   const SizedBox(width: 4),
                   Transform.scale(
                     scale: 0.8,
                     child: Switch(
                       value: _hideKeyboard,
-                      activeThumbColor: kPrimaryColor,
+                      activeThumbColor: kProdOrderPrimary,
                       onChanged: (val) async {
                         setState(() => _hideKeyboard = val);
-                        final prefs = await SharedPreferences.getInstance();
-                        await prefs.setBool('hide_keyboard_pda', val);
+                        try {
+                          final prefs = await SharedPreferences.getInstance();
+                          await prefs.setBool('hide_keyboard_pda', val);
+                        } catch (_) {}
                         _scanFocusNode.unfocus();
                         _refocus();
                       },
@@ -1269,7 +882,7 @@ class _BagLinkingScreenState extends ConsumerState<BagLinkingScreen> {
               ),
             ],
           ),
-          const SizedBox(height: 8),
+          const SizedBox(height: 6),
           Row(
             children: [
               Expanded(
@@ -1279,67 +892,67 @@ class _BagLinkingScreenState extends ConsumerState<BagLinkingScreen> {
                   autofocus: true,
                   readOnly: _hideKeyboard,
                   showCursor: true,
-                  enableInteractiveSelection: true,
-                  textInputAction: TextInputAction.none,
-                  keyboardType: TextInputType.multiline,
-                  maxLines: 1,
-                  style: const TextStyle(color: kTextLight, fontSize: 16, fontWeight: FontWeight.w600),
-                  decoration: InputDecoration(
-                    hintText: _isBagScanned ? 'Quét/nhập mã gói...' : 'Quét/nhập mã bao (-B)...',
-                    hintStyle: const TextStyle(color: Colors.white24),
-                    border: InputBorder.none,
-                    prefixIcon: Icon(_isBagScanned ? Icons.qr_code : Icons.inventory_2, color: kPrimaryColor),
+                  style: const TextStyle(color: Colors.white, fontSize: 15, fontWeight: FontWeight.w600),
+                  decoration: prodOrderInputDeco(
+                    null,
+                    hint: _isBagScanned ? 'Quét/nhập mã gói...' : 'Quét/nhập mã bao (-B)...',
+                    prefixIcon: Icon(
+                      _isBagScanned ? Icons.qr_code_2 : Icons.inventory_2,
+                      color: kProdOrderPrimaryLight,
+                    ),
                   ),
-                  onSubmitted: (_) => _handleScan(),
+                  onSubmitted: (_) => _handleTextScan(),
                   onChanged: (value) {
-                    _debounceTimer?.cancel();
+                    _pdaDebounceTimer?.cancel();
                     if (_hideKeyboard) {
                       SystemChannels.textInput.invokeMethod('TextInput.hide');
                     }
-                    
-                    // Detect scanner carriage return / newline, sanitize it, and scan instantly
                     if (value.contains('\n') || value.contains('\r')) {
-                      final cleanValue = value.replaceAll(RegExp(r'[\n\r]'), '').trim();
+                      final clean = value.replaceAll(RegExp(r'[\n\r]'), '').trim();
                       _scanController.value = TextEditingValue(
-                        text: cleanValue,
-                        selection: TextSelection.collapsed(offset: cleanValue.length),
+                        text: clean,
+                        selection: TextSelection.collapsed(offset: clean.length),
                       );
-                      if (cleanValue.isNotEmpty) {
-                        _handleScan();
-                      }
+                      if (clean.isNotEmpty) _handleTextScan();
                       return;
                     }
-                    
                     if (value.trim().isNotEmpty) {
-                      _debounceTimer = Timer(const Duration(milliseconds: 300), () {
-                        if (_scanController.text.trim().isNotEmpty && mounted) {
-                          _handleScan();
+                      final delay = Duration(milliseconds: _hideKeyboard ? 350 : 600);
+                      _pdaDebounceTimer = Timer(delay, () {
+                        if (mounted &&
+                            !_isScanning &&
+                            _scanController.text.trim().isNotEmpty) {
+                          _handleTextScan();
                         }
                       });
-                    }
-                  },
-                  onTap: () {
-                    _scanController.selection = TextSelection.fromPosition(
-                      TextPosition(offset: _scanController.text.length),
-                    );
-                    if (_hideKeyboard) {
-                      SystemChannels.textInput.invokeMethod('TextInput.hide');
                     }
                   },
                 ),
               ),
               const SizedBox(width: 8),
-              ElevatedButton(
-                onPressed: _isScanning ? null : _handleScan,
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: kPrimaryColor,
-                  foregroundColor: Colors.white,
-                  padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
-                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+              Tooltip(
+                message: 'Quét QR bằng Camera',
+                child: SizedBox(
+                  width: 48,
+                  height: 48,
+                  child: ElevatedButton(
+                    onPressed:
+                        (_isScanning || _isSubmittingAction) ? null : _showCameraScanner,
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: kProdOrderPrimary,
+                      foregroundColor: Colors.white,
+                      padding: EdgeInsets.zero,
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                    ),
+                    child: _isScanning
+                        ? const SizedBox(
+                            width: 18,
+                            height: 18,
+                            child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
+                          )
+                        : const Icon(Icons.qr_code_scanner, size: 22),
+                  ),
                 ),
-                child: _isScanning
-                    ? const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
-                    : const Text('Thêm'),
               ),
             ],
           ),
@@ -1348,72 +961,112 @@ class _BagLinkingScreenState extends ConsumerState<BagLinkingScreen> {
     );
   }
 
-  Widget _buildStats() {
-    final linkedCount = _bagMappings.where((b) => b.lotStatus == 'LINKED').length;
-    final totalPackets = _bagMappings.fold<int>(0, (sum, b) => sum + b.packetCount);
-    return Container(
-      margin: const EdgeInsets.symmetric(horizontal: 16),
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
-      decoration: BoxDecoration(color: kSurfaceDark, borderRadius: BorderRadius.circular(10)),
-      child: Row(
-        mainAxisAlignment: MainAxisAlignment.spaceAround,
-        children: [
-          _statItem('Tổng bao', '${_bagMappings.length}', kPrimaryColor),
-          Container(width: 1, height: 30, color: Colors.white10),
-          _statItem('Đã link', '$linkedCount', Colors.blue.shade300),
-          Container(width: 1, height: 30, color: Colors.white10),
-          _statItem('Tổng gói', '$totalPackets', Colors.amber.shade300),
-        ],
-      ),
-    );
-  }
-
-  Widget _statItem(String label, String value, Color color) {
-    return Column(
-      children: [
-        Text(value, style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: color)),
-        Text(label, style: const TextStyle(fontSize: 11, color: kTextGray)),
-      ],
-    );
-  }
-
   Widget _buildBagList() {
     if (_bagMappings.isEmpty) {
       return const Padding(
         padding: EdgeInsets.symmetric(vertical: 40),
         child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            Icon(Icons.inventory_2_outlined, size: 64, color: Colors.white12),
-            SizedBox(height: 12),
-            Text('Chưa có bao nào', style: TextStyle(color: kTextGray)),
+            Icon(Icons.inventory_2_outlined, size: 60, color: Colors.white12),
+            SizedBox(height: 10),
+            Text('Chưa có bao nào trong phiếu này.', style: TextStyle(color: kProdOrderTextGray)),
           ],
         ),
       );
     }
+
+    final displayCount = math.min(_bagMappings.length, _visibleLimit);
+    final hasMoreLocal = _bagMappings.length > displayCount;
+
     return ListView.builder(
       shrinkWrap: true,
       physics: const NeverScrollableScrollPhysics(),
-      itemCount: _bagMappings.length,
-      padding: const EdgeInsets.only(top: 8, bottom: 16),
+      itemCount: displayCount + (hasMoreLocal ? 1 : 0),
+      padding: const EdgeInsets.only(bottom: 24),
       itemBuilder: (context, index) {
+        if (hasMoreLocal && index == displayCount) {
+          return Center(
+            child: TextButton(
+              onPressed: () => setState(() => _visibleLimit += _pageWindowSize),
+              child: Text(
+                'Xem thêm (${_bagMappings.length - displayCount} bao nữa)',
+                style: const TextStyle(color: kProdOrderPrimaryLight),
+              ),
+            ),
+          );
+        }
         final bag = _bagMappings[index];
-        final isActive = bag.bagSerial == _currentBagSerial;
-        return Container(
-          decoration: isActive
-              ? BoxDecoration(border: Border.all(color: kPrimaryColor.withOpacity(0.5), width: 2), borderRadius: BorderRadius.circular(14))
-              : null,
-          margin: isActive ? const EdgeInsets.symmetric(horizontal: 14, vertical: 2) : EdgeInsets.zero,
-          child: BagCardWidget(
-            index: index,
-            bagSerial: bag.bagSerial,
-            bagQrCode: bag.bagQrCode,
-            productName: bag.productName,
-            packetCount: bag.packetCount,
-            linkerName: bag.linkerName,
-          ),
+        return BagCardWidget(
+          index: index,
+          bagSerial: bag.bagSerial,
+          bagQrCode: bag.bagQrCode,
+          productName: bag.productName ??
+              (bag.packetSerialStart != null
+                  ? '${bag.packetSerialStart} → ${bag.packetSerialEnd ?? ''}'
+                  : null),
+          packetCount: bag.packetCount,
+          linkerName: bag.linkerName,
+          onTap: () => _openPacketDetail(bag),
+          onDelete: _isEditable ? () => _confirmRemoveBag(bag) : null,
         );
       },
+    );
+  }
+
+  Widget _buildBottomBar() {
+    final canComplete = (_bagMappings.isNotEmpty || _totalBags > 0) && !_isSubmittingAction;
+
+    return Container(
+      padding: EdgeInsets.fromLTRB(16, 10, 16, MediaQuery.of(context).padding.bottom + 10),
+      decoration: BoxDecoration(
+        color: kProdOrderBg,
+        border: Border(top: BorderSide(color: Colors.white.withValues(alpha: 0.08))),
+      ),
+      child: Row(
+        children: [
+          Expanded(
+            flex: 4,
+            child: SizedBox(
+              height: 48,
+              child: OutlinedButton(
+                onPressed: _isSubmittingAction ? null : _onTapCancelReceipt,
+                style: OutlinedButton.styleFrom(
+                  foregroundColor: Colors.redAccent,
+                  side: const BorderSide(color: Colors.redAccent),
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                ),
+                child: const Text('Hủy phiếu', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13)),
+              ),
+            ),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            flex: 6,
+            child: SizedBox(
+              height: 48,
+              child: ElevatedButton(
+                onPressed: canComplete ? _onTapCompleteReceipt : null,
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: kProdOrderPrimary,
+                  disabledBackgroundColor: kProdOrderPrimary.withValues(alpha: 0.35),
+                  foregroundColor: Colors.white,
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                ),
+                child: _isSubmittingAction
+                    ? const SizedBox(
+                        width: 18,
+                        height: 18,
+                        child: CircularProgressIndicator(color: Colors.white, strokeWidth: 2),
+                      )
+                    : const Text(
+                        'Lưu & Nhập kho',
+                        style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
+                      ),
+              ),
+            ),
+          ),
+        ],
+      ),
     );
   }
 }

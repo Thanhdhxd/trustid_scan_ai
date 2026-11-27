@@ -207,24 +207,23 @@ class _HistoryScreenState extends State<HistoryScreen> {
                             children: [
                               Text(
                                 productName ?? 'Sản phẩm: $code',
+                                softWrap: true,
                                 style: const TextStyle(
                                   color: Colors.white,
                                   fontWeight: FontWeight.bold,
                                   fontSize: 15,
                                 ),
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
                               ),
                               const SizedBox(height: 4),
-                              Row(
+                              Wrap(
+                                spacing: 8,
+                                runSpacing: 4,
+                                crossAxisAlignment: WrapCrossAlignment.center,
                                 children: [
-                                  Expanded(
-                                    child: Text(
-                                      'Mã: $code',
-                                      style: TextStyle(color: Colors.white.withOpacity(0.6), fontSize: 13),
-                                      maxLines: 1,
-                                      overflow: TextOverflow.ellipsis,
-                                    ),
+                                  Text(
+                                    'Mã: $code',
+                                    softWrap: true,
+                                    style: TextStyle(color: Colors.white.withOpacity(0.6), fontSize: 13),
                                   ),
                                   Container(
                                     padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
@@ -240,12 +239,11 @@ class _HistoryScreenState extends State<HistoryScreen> {
                                 ],
                               ),
                               if (supplierName != null && supplierName.isNotEmpty) ...[
-                                const SizedBox(height: 2),
+                                const SizedBox(height: 4),
                                 Text(
                                   supplierName,
-                                  style: TextStyle(color: Colors.white.withOpacity(0.4), fontSize: 11),
-                                  maxLines: 1,
-                                  overflow: TextOverflow.ellipsis,
+                                  softWrap: true,
+                                  style: TextStyle(color: Colors.white.withOpacity(0.45), fontSize: 11),
                                 ),
                               ],
                               const SizedBox(height: 4),

@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hive_flutter/hive_flutter.dart';
 import 'auth/login_screen.dart';
 import 'core/api_client.dart';
+import 'core/services/app_route_observer.dart';
 import 'home/widgets/consumer_theme.dart';
 import 'home/modern_home_screen.dart';
 import 'auth/presentation/auth_controller.dart';
@@ -51,6 +52,7 @@ class MyApp extends ConsumerWidget {
     return MaterialApp(
       title: 'TrustID Scan AI Demo',
       debugShowCheckedModeBanner: false,
+      navigatorObservers: [appRouteObserver],
       theme: ThemeData(
         colorSchemeSeed: ConsumerTheme.actionBlue,
         useMaterial3: true,

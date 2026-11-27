@@ -2,134 +2,92 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:mobile_scanner/mobile_scanner.dart';
-import 'package:dio/dio.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:trustid_scan_ai/core/utils/app_toast.dart';
+import 'package:trustid_scan_ai/core/utils/error_utils.dart';
+import 'package:trustid_scan_ai/core/utils/scan_feedback_helper.dart';
+import 'package:trustid_scan_ai/scan/scanner_screen.dart';
 import '../data/supply_repository.dart';
 import '../domain/pallet.dart';
+import 'production_order/constants/prod_order_constants.dart';
+import 'production_order/constants/prod_order_helpers.dart';
 import 'widgets/bag_card_widget.dart';
 import 'widgets/pallet_info_card.dart';
-import 'package:trustid_scan_ai/scan/scanner_screen.dart';
 
+/// Màn hình Đóng Pallet (`PALLET_MANAGE` — `/supply/pallets/:id/link-bag`).
+/// Hỗ trợ cả 2 chế độ: theo Lệnh Sản Xuất (`orderId != null`) và độc lập ngoài lệnh (`orderId == null`).
+/// Quét trực tuyến hoàn toàn (Zero Offline Queue) và tự động lưu thẳng vào DB sau mỗi lượt quét/gỡ bao.
 class PalletLinkingScreen extends ConsumerStatefulWidget {
-  final String orderId;
-  const PalletLinkingScreen({super.key, required this.orderId});
+  final String? orderId;
+  const PalletLinkingScreen({super.key, this.orderId});
 
   @override
   ConsumerState<PalletLinkingScreen> createState() => _PalletLinkingScreenState();
 }
 
 class _PalletLinkingScreenState extends ConsumerState<PalletLinkingScreen> {
-  static const Color kPrimaryColor = Color(0xFF00875A);
-  static const Color kBackgroundDark = Color(0xFF0F2B46);
-  static const Color kSurfaceDark = Color(0xFF16325B);
-  static const Color kTextLight = Color(0xFFE8EDF3);
-  static const Color kTextGray = Color(0xFF94A3B8);
-
   final _scanController = TextEditingController();
   late final FocusNode _scanFocusNode;
-  final MobileScannerController _cameraController = MobileScannerController();
 
-  // Order info
   String _orderCode = '';
   String _productName = '';
 
-  // Pallet state
   Pallet? _currentPallet;
   bool _isLoadingPallet = false;
-
-  // Scan state
   bool _isScanning = false;
-  bool _palletScanned = false;
-  Timer? _debounceTimer;
+  bool _dialogOpen = false;
   bool _hideKeyboard = false;
+  Timer? _pdaDebounceTimer;
+
+  bool get _hasOrder => widget.orderId != null && widget.orderId!.trim().isNotEmpty;
+  bool get _palletScanned => _currentPallet != null;
 
   @override
   void initState() {
     super.initState();
     _scanFocusNode = FocusNode(
-      debugLabel: 'scanFocusNode',
+      debugLabel: 'palletScanFocusNode',
       onKeyEvent: (node, event) {
-        if (!_hideKeyboard) return KeyEventResult.ignored;
-        
-        if (event is KeyDownEvent) {
-          final key = event.logicalKey;
-          if (key == LogicalKeyboardKey.enter || key == LogicalKeyboardKey.numpadEnter) {
-            if (_scanController.text.trim().isNotEmpty) {
-              _handleScan();
-            }
-            return KeyEventResult.handled;
-          } else if (key == LogicalKeyboardKey.backspace) {
-            if (_scanController.text.isNotEmpty) {
-              final newText = _scanController.text.substring(0, _scanController.text.length - 1);
-              _scanController.value = TextEditingValue(
-                text: newText,
-                selection: TextSelection.collapsed(offset: newText.length),
-              );
-            }
-            return KeyEventResult.handled;
-          } else if (event.character != null && event.character!.isNotEmpty) {
-            if (event.character == '\n' || event.character == '\r') {
-              if (_scanController.text.trim().isNotEmpty) {
-                _handleScan();
-              }
-            } else {
-              final newText = _scanController.text + event.character!;
-              _scanController.value = TextEditingValue(
-                text: newText,
-                selection: TextSelection.collapsed(offset: newText.length),
-              );
-            }
-            return KeyEventResult.handled;
+        if (!_hideKeyboard || event is! KeyDownEvent) {
+          return KeyEventResult.ignored;
+        }
+        final key = event.logicalKey;
+        if (key == LogicalKeyboardKey.enter || key == LogicalKeyboardKey.numpadEnter) {
+          if (_scanController.text.trim().isNotEmpty) {
+            _handleTextScan();
           }
+          return KeyEventResult.handled;
+        } else if (key == LogicalKeyboardKey.backspace) {
+          if (_scanController.text.isNotEmpty) {
+            final next = _scanController.text.substring(0, _scanController.text.length - 1);
+            _scanController.value = TextEditingValue(
+              text: next,
+              selection: TextSelection.collapsed(offset: next.length),
+            );
+          }
+          return KeyEventResult.handled;
+        } else if (event.character != null && event.character!.isNotEmpty) {
+          if (event.character == '\n' || event.character == '\r') {
+            if (_scanController.text.trim().isNotEmpty) {
+              _handleTextScan();
+            }
+          } else {
+            final next = _scanController.text + event.character!;
+            _scanController.value = TextEditingValue(
+              text: next,
+              selection: TextSelection.collapsed(offset: next.length),
+            );
+          }
+          return KeyEventResult.handled;
         }
         return KeyEventResult.ignored;
       },
     );
     _scanFocusNode.addListener(_onFocusChange);
     _loadPreferences();
-    _loadOrderInfo();
-  }
-
-  void _onFocusChange() {
-    if (_scanFocusNode.hasFocus) {
-      if (_hideKeyboard) {
-        SystemChannels.textInput.invokeMethod('TextInput.hide');
-      }
-    } else {
-      if (!mounted) return;
-      final route = ModalRoute.of(context);
-      if (route != null && route.isCurrent) {
-        Future.delayed(const Duration(milliseconds: 100), () {
-          if (mounted && !_scanFocusNode.hasFocus && _scanFocusNode.canRequestFocus) {
-            if (route.isCurrent) {
-              _scanFocusNode.requestFocus();
-              if (_hideKeyboard) {
-                SystemChannels.textInput.invokeMethod('TextInput.hide');
-              }
-            }
-          }
-        });
-      }
-    }
-  }
-
-  void _refocus() {
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (mounted && _scanFocusNode.canRequestFocus) {
-        _scanFocusNode.requestFocus();
-        if (_hideKeyboard) {
-          SystemChannels.textInput.invokeMethod('TextInput.hide');
-        }
-      }
-    });
-  }
-
-  Future<void> _loadPreferences() async {
-    final prefs = await SharedPreferences.getInstance();
-    if (mounted) {
-      setState(() {
-        _hideKeyboard = prefs.getBool('hide_keyboard_pda') ?? false;
+    if (_hasOrder) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) _loadOrderInfo();
       });
     }
   }
@@ -137,33 +95,88 @@ class _PalletLinkingScreenState extends ConsumerState<PalletLinkingScreen> {
   @override
   void dispose() {
     _scanFocusNode.removeListener(_onFocusChange);
-    _debounceTimer?.cancel();
+    _pdaDebounceTimer?.cancel();
     _scanController.dispose();
     _scanFocusNode.dispose();
-    _cameraController.dispose();
     super.dispose();
   }
 
-  Future<void> _loadOrderInfo() async {
+  void _onFocusChange() {
+    if (!_hideKeyboard) return;
+    if (_scanFocusNode.hasFocus) {
+      SystemChannels.textInput.invokeMethod('TextInput.hide');
+      return;
+    }
+    if (!mounted) return;
+    final route = ModalRoute.of(context);
+    if (route != null && route.isCurrent) {
+      Future.delayed(const Duration(milliseconds: 100), () {
+        if (mounted &&
+            _hideKeyboard &&
+            !_dialogOpen &&
+            !_scanFocusNode.hasFocus &&
+            _scanFocusNode.canRequestFocus) {
+          if (route.isCurrent) {
+            _scanFocusNode.requestFocus();
+            SystemChannels.textInput.invokeMethod('TextInput.hide');
+          }
+        }
+      });
+    }
+  }
+
+  void _refocus() {
+    if (!_hideKeyboard || _dialogOpen) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted && _hideKeyboard && !_dialogOpen && _scanFocusNode.canRequestFocus) {
+        _scanFocusNode.requestFocus();
+        SystemChannels.textInput.invokeMethod('TextInput.hide');
+      }
+    });
+  }
+
+  Future<void> _loadPreferences() async {
     try {
-      final data = await ref.read(supplyRepositoryProvider).getProductionOrderDetail(widget.orderId);
+      final prefs = await SharedPreferences.getInstance();
       if (mounted) {
-        setState(() {
-          _orderCode = data['orderCode'] ?? '';
-          _productName = data['product']?['name'] ?? data['productName'] ?? '';
-        });
+        setState(() => _hideKeyboard = prefs.getBool('hide_keyboard_pda') ?? false);
       }
     } catch (_) {}
   }
 
-  void _handleScan() {
-    final code = _scanController.text.trim();
+  Future<void> _loadOrderInfo() async {
+    if (!_hasOrder) return;
+    try {
+      final data = await ref
+          .read(supplyRepositoryProvider)
+          .getProductionOrderDetail(widget.orderId!);
+      if (!mounted) return;
+      setState(() {
+        _orderCode = (data['orderCode'] ?? data['order_code'] ?? '').toString();
+        _productName = (data['product']?['name'] ?? data['productName'] ?? '').toString();
+      });
+    } catch (_) {}
+  }
+
+  Future<void> _handleTextScan() async {
+    if (_isScanning || _dialogOpen) return;
+    _pdaDebounceTimer?.cancel();
+    final code = extractSerialCodeFromQr(_scanController.text);
     if (code.isEmpty) return;
 
-    if (!_palletScanned) {
-      _scanPallet(code);
+    _scanController.clear();
+    await _processScan(code);
+    _refocus();
+  }
+
+  Future<void> _processScan(String code) async {
+    if (_isScanning || _dialogOpen) return;
+
+    final isExplicitPallet = code.toUpperCase().startsWith('PLT');
+    if (!_palletScanned || isExplicitPallet) {
+      await _scanPallet(code);
     } else {
-      _scanBag(code);
+      await _scanBag(code);
     }
   }
 
@@ -171,24 +184,20 @@ class _PalletLinkingScreenState extends ConsumerState<PalletLinkingScreen> {
     setState(() => _isScanning = true);
     try {
       final data = await ref.read(supplyRepositoryProvider).getPalletByCode(code);
+      ScanFeedbackHelper.playSuccess();
+
       final pallet = Pallet.fromJson(data);
-      setState(() {
-        _currentPallet = pallet;
-        _palletScanned = true;
-        _scanController.clear();
-      });
-      HapticFeedback.mediumImpact();
-      _showSnack('✅ Pallet ${pallet.palletCode} đã sẵn sàng', isError: false);
-    } on DioException catch (e) {
-      final msg = e.response?.data?['message'] ?? 'Không tìm thấy pallet';
-      HapticFeedback.heavyImpact();
-      _showSnack('❌ $msg', isError: true);
+      if (!mounted) return;
+      setState(() => _currentPallet = pallet);
+
+      AppToast.success(context, 'Pallet ${pallet.palletCode} sẵn sàng — quét mã bao để xếp');
     } catch (e) {
-      _showSnack('❌ Lỗi: $e', isError: true);
+      ScanFeedbackHelper.playError();
+      final msg = parseSupplyHttpError(e).message;
+      if (!mounted) return;
+      AppToast.error(context, msg);
     } finally {
-      setState(() => _isScanning = false);
-      _scanController.clear();
-      _refocus();
+      if (mounted) setState(() => _isScanning = false);
     }
   }
 
@@ -196,166 +205,216 @@ class _PalletLinkingScreenState extends ConsumerState<PalletLinkingScreen> {
     if (_currentPallet == null) return;
     setState(() => _isScanning = true);
     try {
-      final data = await ref.read(supplyRepositoryProvider).linkBagToPallet(
-        _currentPallet!.id, serial,
-      );
+      final data = await ref
+          .read(supplyRepositoryProvider)
+          .linkBagToPallet(_currentPallet!.id, serial);
 
+      if (!mounted) return;
       if (data['conflict'] == true) {
-        _showTransferDialog(serial, data['message'] ?? 'Bao đang ở pallet khác');
+        ScanFeedbackHelper.playError();
+        setState(() => _isScanning = false);
+        await _showForceConfirmDialog(
+          serial: serial,
+          title: 'Bao đã ở pallet khác',
+          message: data['message']?.toString() ?? 'Bao đang ở pallet khác. Xác nhận chuyển sang pallet này?',
+          confirmCheckboxLabel: 'Tôi xác nhận muốn chuyển bao sang pallet mới',
+          confirmBtnLabel: 'Chuyển pallet',
+        );
         return;
       }
+
       if (data['crossProductWarning'] == true) {
-        _showCrossProductDialog(serial, data['message'] ?? 'Bao khác sản phẩm');
+        ScanFeedbackHelper.playError();
+        setState(() => _isScanning = false);
+        await _showForceConfirmDialog(
+          serial: serial,
+          title: 'Cảnh báo bao khác sản phẩm',
+          message: data['message']?.toString() ?? 'Bao chứa sản phẩm khác loại với các bao đang có trong pallet.',
+          confirmCheckboxLabel: 'Tôi xác nhận xếp bao khác sản phẩm vào pallet',
+          confirmBtnLabel: 'Xác nhận xếp',
+        );
         return;
       }
+
       if (data['success'] == true) {
-        HapticFeedback.mediumImpact();
-        _showSnack('✅ Đã liên kết bao $serial', isError: false);
+        ScanFeedbackHelper.playSuccess();
         await _refreshPallet();
+        if (!mounted) return;
+        AppToast.success(context, 'Đã liên kết bao $serial vào ${_currentPallet!.palletCode}');
       }
-    } on DioException catch (e) {
-      final msg = e.response?.data?['message'] ?? 'Lỗi liên kết';
-      HapticFeedback.heavyImpact();
-      _showSnack('❌ $msg', isError: true);
+    } catch (e) {
+      ScanFeedbackHelper.playError();
+      final msg = parseSupplyHttpError(e).message;
+      if (!mounted) return;
+      AppToast.error(context, msg);
     } finally {
-      setState(() => _isScanning = false);
-      _scanController.clear();
-      _refocus();
+      if (mounted) setState(() => _isScanning = false);
     }
   }
 
   Future<void> _forceLink(String serial) async {
     if (_currentPallet == null) return;
+    setState(() => _isScanning = true);
     try {
-      final data = await ref.read(supplyRepositoryProvider).linkBagToPallet(
-        _currentPallet!.id, serial, force: true,
-      );
+      final data = await ref
+          .read(supplyRepositoryProvider)
+          .linkBagToPallet(_currentPallet!.id, serial, force: true);
+      if (!mounted) return;
       if (data['success'] == true) {
-        HapticFeedback.mediumImpact();
-        _showSnack('✅ Đã chuyển bao $serial', isError: false);
+        ScanFeedbackHelper.playSuccess();
         await _refreshPallet();
+        if (!mounted) return;
+        AppToast.success(context, 'Đã liên kết bao $serial');
       }
-    } on DioException catch (e) {
-      _showSnack('❌ ${e.response?.data?['message'] ?? 'Lỗi'}', isError: true);
-    }
-  }
-
-  Future<void> _refreshPallet() async {
-    if (_currentPallet == null) return;
-    setState(() => _isLoadingPallet = true);
-    try {
-      final data = await ref.read(supplyRepositoryProvider).getPalletDetail(_currentPallet!.id);
-      setState(() => _currentPallet = Pallet.fromJson(data));
-    } catch (_) {}
-    setState(() => _isLoadingPallet = false);
-  }
-
-  Future<void> _unlinkBag(PalletBagMapping mapping) async {
-    final confirm = await showDialog<bool>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        backgroundColor: kSurfaceDark,
-        title: const Text('Gỡ bao', style: TextStyle(color: kTextLight)),
-        content: Text('Gỡ bao ${mapping.bagSerial} khỏi pallet?', style: const TextStyle(color: kTextGray)),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Huỷ')),
-          TextButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Gỡ', style: TextStyle(color: Colors.redAccent))),
-        ],
-      ),
-    );
-    if (confirm != true || _currentPallet == null) return;
-    try {
-      await ref.read(supplyRepositoryProvider).unlinkBagFromPallet(_currentPallet!.id, mapping.bagSerial);
-      _showSnack('Đã gỡ bao', isError: false);
-      await _refreshPallet();
     } catch (e) {
-      _showSnack('Lỗi gỡ bao', isError: true);
+      ScanFeedbackHelper.playError();
+      final msg = parseSupplyHttpError(e).message;
+      if (!mounted) return;
+      AppToast.error(context, msg);
+    } finally {
+      if (mounted) setState(() => _isScanning = false);
     }
   }
 
-  void _showTransferDialog(String serial, String message) {
+  Future<void> _showForceConfirmDialog({
+    required String serial,
+    required String title,
+    required String message,
+    required String confirmCheckboxLabel,
+    required String confirmBtnLabel,
+  }) async {
     bool confirmed = false;
-    showDialog(
+    _dialogOpen = true;
+    await showDialog<void>(
       context: context,
       barrierDismissible: false,
       builder: (ctx) => StatefulBuilder(
         builder: (ctx, setDialogState) => AlertDialog(
-          backgroundColor: kSurfaceDark,
-          title: const Row(
+          backgroundColor: kProdOrderSurface,
+          title: Row(
             children: [
-              Icon(Icons.warning_amber, color: Colors.orange, size: 24),
-              SizedBox(width: 8),
-              Text('Bao đã ở pallet khác', style: TextStyle(color: kTextLight, fontSize: 16)),
+              const Icon(Icons.warning_amber_rounded, color: kProdOrderAmber, size: 22),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  title,
+                  style: const TextStyle(color: Colors.white, fontSize: 15.5, fontWeight: FontWeight.bold),
+                ),
+              ),
             ],
           ),
           content: Column(
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Text(message, style: const TextStyle(color: kTextGray)),
-              const SizedBox(height: 16),
+              Text(message, style: const TextStyle(color: kProdOrderTextSub, fontSize: 13)),
+              const SizedBox(height: 12),
               Row(
                 children: [
                   Checkbox(
                     value: confirmed,
                     onChanged: (v) => setDialogState(() => confirmed = v ?? false),
-                    activeColor: kPrimaryColor,
+                    activeColor: kProdOrderPrimary,
                   ),
-                  const Expanded(
-                    child: Text('Tôi xác nhận muốn chuyển bao', style: TextStyle(color: kTextLight, fontSize: 13)),
+                  Expanded(
+                    child: Text(
+                      confirmCheckboxLabel,
+                      style: const TextStyle(color: Colors.white, fontSize: 12.5),
+                    ),
                   ),
                 ],
               ),
             ],
           ),
           actions: [
-            TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Huỷ')),
             TextButton(
-              onPressed: confirmed ? () { Navigator.pop(ctx); _forceLink(serial); } : null,
-              child: Text('Chuyển pallet', style: TextStyle(color: confirmed ? Colors.orange : Colors.white24)),
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('Hủy', style: TextStyle(color: kProdOrderTextGray)),
+            ),
+            ElevatedButton(
+              onPressed: confirmed
+                  ? () {
+                      Navigator.pop(ctx);
+                      _forceLink(serial);
+                    }
+                  : null,
+              style: ElevatedButton.styleFrom(backgroundColor: Colors.orange.shade700),
+              child: Text(confirmBtnLabel, style: const TextStyle(color: Colors.white)),
             ),
           ],
         ),
       ),
     );
+    _dialogOpen = false;
+    _refocus();
   }
 
-  void _showCrossProductDialog(String serial, String message) {
-    bool confirmed = false;
-    showDialog(
+  Future<void> _refreshPallet() async {
+    if (_currentPallet == null) return;
+    setState(() => _isLoadingPallet = true);
+    try {
+      final data = await ref
+          .read(supplyRepositoryProvider)
+          .getPalletDetail(_currentPallet!.id);
+      if (mounted) {
+        setState(() => _currentPallet = Pallet.fromJson(data));
+      }
+    } catch (_) {
+    } finally {
+      if (mounted) setState(() => _isLoadingPallet = false);
+    }
+  }
+
+  Future<void> _unlinkBag(PalletBagMapping mapping) async {
+    if (_currentPallet == null) return;
+    _dialogOpen = true;
+    final confirm = await showDialog<bool>(
       context: context,
-      barrierDismissible: false,
-      builder: (ctx) => StatefulBuilder(
-        builder: (ctx, setDialogState) => AlertDialog(
-          backgroundColor: kSurfaceDark,
-          title: const Text('⚠️ Bao khác sản phẩm', style: TextStyle(color: Colors.orange, fontSize: 16)),
-          content: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Text(message, style: const TextStyle(color: kTextGray)),
-              const SizedBox(height: 16),
-              Row(
-                children: [
-                  Checkbox(
-                    value: confirmed,
-                    onChanged: (v) => setDialogState(() => confirmed = v ?? false),
-                    activeColor: kPrimaryColor,
-                  ),
-                  const Expanded(child: Text('Xác nhận liên kết bao khác SP', style: TextStyle(color: kTextLight, fontSize: 13))),
-                ],
-              ),
-            ],
-          ),
-          actions: [
-            TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Huỷ')),
-            TextButton(
-              onPressed: confirmed ? () { Navigator.pop(ctx); _forceLink(serial); } : null,
-              child: Text('Xác nhận', style: TextStyle(color: confirmed ? Colors.orange : Colors.white24)),
-            ),
-          ],
+      builder: (ctx) => AlertDialog(
+        backgroundColor: kProdOrderSurface,
+        title: const Text('Gỡ bao khỏi pallet', style: TextStyle(color: Colors.white, fontSize: 16)),
+        content: Text(
+          'Gỡ bao ${mapping.bagSerial} khỏi pallet ${_currentPallet!.palletCode}?',
+          style: const TextStyle(color: kProdOrderTextSub, fontSize: 13),
         ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Hủy', style: TextStyle(color: kProdOrderTextGray)),
+          ),
+          ElevatedButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            style: ElevatedButton.styleFrom(backgroundColor: Colors.redAccent),
+            child: const Text('Gỡ bao', style: TextStyle(color: Colors.white)),
+          ),
+        ],
       ),
     );
+    _dialogOpen = false;
+    if (confirm != true || !mounted) {
+      _refocus();
+      return;
+    }
+
+    try {
+      await ref
+          .read(supplyRepositoryProvider)
+          .unlinkBagFromPallet(_currentPallet!.id, mapping.bagSerial);
+      if (!mounted) return;
+      AppToast.info(context, 'Đã gỡ bao ${mapping.bagSerial}.');
+      await _refreshPallet();
+    } catch (e) {
+      if (mounted) AppToast.error(context, parseSupplyHttpError(e).message);
+    }
+    _refocus();
+  }
+
+  void _clearPallet() {
+    setState(() {
+      _currentPallet = null;
+      _scanController.clear();
+    });
+    _refocus();
   }
 
   Future<void> _showCameraScanner() async {
@@ -364,62 +423,69 @@ class _PalletLinkingScreenState extends ConsumerState<PalletLinkingScreen> {
       MaterialPageRoute(
         builder: (context) => ScannerScreen(
           title: _palletScanned ? 'Quét mã bao' : 'Quét mã pallet',
-          returnCode: true,
+          isWarehouseMode: true,
         ),
       ),
     );
 
     if (result != null && result.isNotEmpty && mounted) {
-      _scanController.text = result;
-      _handleScan();
+      final code = extractSerialCodeFromQr(result);
+      if (code.isNotEmpty) {
+        await _processScan(code);
+      }
     }
-  }
-
-  void _clearPallet() {
-    setState(() {
-      _currentPallet = null;
-      _palletScanned = false;
-    });
-  }
-
-  void _showSnack(String msg, {required bool isError}) {
-    if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-      content: Text(msg),
-      backgroundColor: isError ? Colors.red.shade700 : kPrimaryColor,
-      duration: const Duration(seconds: 2),
-    ));
+    _refocus();
   }
 
   @override
   Widget build(BuildContext context) {
+    final titleText = _hasOrder
+        ? (_orderCode.isNotEmpty ? 'Đóng Pallet — $_orderCode' : 'Đóng Pallet')
+        : 'Đóng Pallet ngoài lệnh';
+    final subtitleText = _hasOrder
+        ? _productName
+        : 'Quét mã Pallet trước, sau đó quét mã bao để xếp';
+
     return Scaffold(
-      backgroundColor: kBackgroundDark,
+      backgroundColor: kProdOrderBg,
       appBar: AppBar(
+        titleSpacing: 0,
         title: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            const Text('Xếp Pallet', style: TextStyle(color: kTextLight, fontSize: 16)),
-            if (_orderCode.isNotEmpty)
-              Text('$_orderCode — $_productName', style: const TextStyle(color: kTextGray, fontSize: 12)),
+            FittedBox(
+              fit: BoxFit.scaleDown,
+              alignment: Alignment.centerLeft,
+              child: Text(
+                titleText,
+                style: const TextStyle(color: kProdOrderText, fontSize: 15.5, fontWeight: FontWeight.bold),
+              ),
+            ),
+            if (subtitleText.isNotEmpty)
+              FittedBox(
+                fit: BoxFit.scaleDown,
+                alignment: Alignment.centerLeft,
+                child: Text(
+                  subtitleText,
+                  style: const TextStyle(color: kProdOrderTextGray, fontSize: 12),
+                ),
+              ),
           ],
         ),
-        backgroundColor: kBackgroundDark,
+        backgroundColor: kProdOrderBg,
         elevation: 0,
-        iconTheme: const IconThemeData(color: kTextGray),
+        iconTheme: const IconThemeData(color: kProdOrderTextGray),
         actions: [
           if (_palletScanned)
             IconButton(
-              icon: const Icon(Icons.refresh, color: kTextGray),
+              icon: const Icon(Icons.refresh, color: kProdOrderTextGray),
               onPressed: _refreshPallet,
             ),
         ],
       ),
       body: Column(
         children: [
-          // Scan input
           _buildScanInput(),
-          // Pallet info
           if (_currentPallet != null)
             PalletInfoCard(
               palletCode: _currentPallet!.palletCode,
@@ -427,42 +493,48 @@ class _PalletLinkingScreenState extends ConsumerState<PalletLinkingScreen> {
               currentBags: _currentPallet!.currentBagCount,
               maxBags: _currentPallet!.maxBags,
             ),
-          // Bag list header
           if (_palletScanned)
             Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 16),
+              padding: const EdgeInsets.fromLTRB(16, 0, 16, 6),
               child: Row(
                 mainAxisAlignment: MainAxisAlignment.spaceBetween,
                 children: [
                   Text(
                     'Bao trong pallet (${_currentPallet?.bagMappings.length ?? 0})',
-                    style: const TextStyle(color: kTextGray, fontSize: 13, fontWeight: FontWeight.w600),
+                    style: const TextStyle(
+                      color: kProdOrderTextGray,
+                      fontSize: 13,
+                      fontWeight: FontWeight.w600,
+                    ),
                   ),
                   TextButton.icon(
                     onPressed: _clearPallet,
-                    icon: const Icon(Icons.swap_horiz, size: 16),
-                    label: const Text('Đổi pallet', style: TextStyle(fontSize: 12)),
+                    icon: const Icon(Icons.swap_horiz, size: 16, color: kProdOrderAmber),
+                    label: const Text(
+                      'Đổi pallet',
+                      style: TextStyle(fontSize: 12, color: kProdOrderAmber),
+                    ),
                   ),
                 ],
               ),
             ),
-          // Bag list
           Expanded(child: _buildBagList()),
         ],
       ),
-      bottomNavigationBar: _buildBottomBar(),
-
+      bottomNavigationBar: MediaQuery.of(context).viewInsets.bottom > 0
+          ? null
+          : _buildBottomBar(),
     );
   }
 
   Widget _buildScanInput() {
     return Container(
-      margin: const EdgeInsets.all(16),
+      margin: const EdgeInsets.fromLTRB(16, 12, 16, 10),
       padding: const EdgeInsets.all(12),
       decoration: BoxDecoration(
-        color: kSurfaceDark,
+        color: kProdOrderSurface,
         borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: Colors.white.withOpacity(0.1)),
+        border: Border.all(color: Colors.white.withValues(alpha: 0.08)),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -472,26 +544,33 @@ class _PalletLinkingScreenState extends ConsumerState<PalletLinkingScreen> {
             children: [
               Expanded(
                 child: Text(
-                  _palletScanned ? '📦 Bước 2: Quét mã bao' : '🏷️ Bước 1: Quét mã pallet',
-                  style: const TextStyle(color: kTextGray, fontSize: 12, fontWeight: FontWeight.w600),
+                  _palletScanned
+                      ? 'Bước 2: Quét mã bao (hoặc mã Pallet mới)'
+                      : 'Bước 1: Quét mã Pallet',
+                  style: TextStyle(
+                    color: _palletScanned ? kProdOrderPrimaryLight : kProdOrderAmber,
+                    fontSize: 12,
+                    fontWeight: FontWeight.bold,
+                  ),
                   overflow: TextOverflow.ellipsis,
                 ),
               ),
-              const SizedBox(width: 8),
               Row(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  const Text('Ẩn bàn phím', style: TextStyle(color: kTextGray, fontSize: 11)),
+                  const Text('Ẩn bàn phím', style: TextStyle(color: kProdOrderTextGray, fontSize: 11)),
                   const SizedBox(width: 4),
                   Transform.scale(
                     scale: 0.8,
                     child: Switch(
                       value: _hideKeyboard,
-                      activeThumbColor: kPrimaryColor,
+                      activeThumbColor: kProdOrderPrimary,
                       onChanged: (val) async {
                         setState(() => _hideKeyboard = val);
-                        final prefs = await SharedPreferences.getInstance();
-                        await prefs.setBool('hide_keyboard_pda', val);
+                        try {
+                          final prefs = await SharedPreferences.getInstance();
+                          await prefs.setBool('hide_keyboard_pda', val);
+                        } catch (_) {}
                         _scanFocusNode.unfocus();
                         _refocus();
                       },
@@ -501,7 +580,7 @@ class _PalletLinkingScreenState extends ConsumerState<PalletLinkingScreen> {
               ),
             ],
           ),
-          const SizedBox(height: 8),
+          const SizedBox(height: 6),
           Row(
             children: [
               Expanded(
@@ -511,70 +590,71 @@ class _PalletLinkingScreenState extends ConsumerState<PalletLinkingScreen> {
                   autofocus: true,
                   readOnly: _hideKeyboard,
                   showCursor: true,
-                  enableInteractiveSelection: true,
-                  textInputAction: TextInputAction.none,
-                  keyboardType: TextInputType.multiline,
-                  maxLines: 1,
-                  style: const TextStyle(color: kTextLight, fontSize: 16, fontWeight: FontWeight.w600),
-                  decoration: InputDecoration(
-                    hintText: _palletScanned ? 'Mã bao (serial/QR)...' : 'Mã pallet...',
-                    hintStyle: const TextStyle(color: Colors.white24),
-                    border: InputBorder.none,
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 15,
+                    fontWeight: FontWeight.w600,
+                  ),
+                  decoration: prodOrderInputDeco(
+                    null,
+                    hint: _palletScanned ? 'Quét/nhập mã bao...' : 'Quét/nhập mã pallet...',
                     prefixIcon: Icon(
                       _palletScanned ? Icons.inventory_2 : Icons.palette_outlined,
-                      color: kPrimaryColor,
+                      color: kProdOrderPrimaryLight,
                     ),
                   ),
-                  onSubmitted: (_) => _handleScan(),
+                  onSubmitted: (_) => _handleTextScan(),
                   onChanged: (value) {
-                    _debounceTimer?.cancel();
+                    _pdaDebounceTimer?.cancel();
                     if (_hideKeyboard) {
                       SystemChannels.textInput.invokeMethod('TextInput.hide');
                     }
-                    
-                    // Detect scanner carriage return / newline, sanitize it, and scan instantly
                     if (value.contains('\n') || value.contains('\r')) {
-                      final cleanValue = value.replaceAll(RegExp(r'[\n\r]'), '').trim();
+                      final clean = value.replaceAll(RegExp(r'[\n\r]'), '').trim();
                       _scanController.value = TextEditingValue(
-                        text: cleanValue,
-                        selection: TextSelection.collapsed(offset: cleanValue.length),
+                        text: clean,
+                        selection: TextSelection.collapsed(offset: clean.length),
                       );
-                      if (cleanValue.isNotEmpty) {
-                        _handleScan();
-                      }
+                      if (clean.isNotEmpty) _handleTextScan();
                       return;
                     }
-                    
                     if (value.trim().isNotEmpty) {
-                      _debounceTimer = Timer(const Duration(milliseconds: 300), () {
-                        if (_scanController.text.trim().isNotEmpty && mounted) {
-                          _handleScan();
+                      final delay = Duration(milliseconds: _hideKeyboard ? 350 : 600);
+                      _pdaDebounceTimer = Timer(delay, () {
+                        if (mounted &&
+                            !_isScanning &&
+                            !_dialogOpen &&
+                            _scanController.text.trim().isNotEmpty) {
+                          _handleTextScan();
                         }
                       });
-                    }
-                  },
-                  onTap: () {
-                    _scanController.selection = TextSelection.fromPosition(
-                      TextPosition(offset: _scanController.text.length),
-                    );
-                    if (_hideKeyboard) {
-                      SystemChannels.textInput.invokeMethod('TextInput.hide');
                     }
                   },
                 ),
               ),
               const SizedBox(width: 8),
-              ElevatedButton(
-                onPressed: _isScanning ? null : _handleScan,
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: kPrimaryColor,
-                  foregroundColor: Colors.white,
-                  padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
-                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+              Tooltip(
+                message: _palletScanned ? 'Quét mã bao bằng Camera' : 'Quét mã pallet bằng Camera',
+                child: SizedBox(
+                  width: 48,
+                  height: 48,
+                  child: ElevatedButton(
+                    onPressed: _isScanning ? null : _showCameraScanner,
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: kProdOrderPrimary,
+                      foregroundColor: Colors.white,
+                      padding: EdgeInsets.zero,
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                    ),
+                    child: _isScanning
+                        ? const SizedBox(
+                            width: 18,
+                            height: 18,
+                            child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
+                          )
+                        : const Icon(Icons.qr_code_scanner, size: 22),
+                  ),
                 ),
-                child: _isScanning
-                    ? const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
-                    : const Text('Quét'),
               ),
             ],
           ),
@@ -591,26 +671,27 @@ class _PalletLinkingScreenState extends ConsumerState<PalletLinkingScreen> {
           children: [
             Icon(Icons.palette_outlined, size: 64, color: Colors.white12),
             SizedBox(height: 12),
-            Text('Quét mã pallet để bắt đầu', style: TextStyle(color: kTextGray)),
+            Text('Quét mã pallet để bắt đầu', style: TextStyle(color: kProdOrderTextGray)),
           ],
         ),
       );
     }
 
     if (_isLoadingPallet) {
-      return const Center(child: CircularProgressIndicator(color: kPrimaryColor));
+      return const Center(child: CircularProgressIndicator(color: kProdOrderPrimary));
     }
 
     final bags = _currentPallet?.bagMappings ?? [];
     if (bags.isEmpty) {
       return const Center(
-        child: Text('Chưa có bao nào trong pallet', style: TextStyle(color: kTextGray)),
+        child: Text('Chưa có bao nào trong pallet', style: TextStyle(color: kProdOrderTextGray)),
       );
     }
 
     return ListView.builder(
+      keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
       itemCount: bags.length,
-      padding: const EdgeInsets.only(bottom: 80),
+      padding: const EdgeInsets.only(bottom: 24),
       itemBuilder: (context, index) {
         final bag = bags[index];
         return BagCardWidget(
@@ -627,78 +708,68 @@ class _PalletLinkingScreenState extends ConsumerState<PalletLinkingScreen> {
   }
 
   Widget _buildBottomBar() {
+    final pallet = _currentPallet;
+    final statusLine = pallet != null
+        ? 'Số bao: ${pallet.currentBagCount}/${pallet.maxBags} • Đã lưu tự động sau mỗi lần quét'
+        : 'Quét mã Pallet để bắt đầu • Đã lưu tự động sau mỗi lần quét';
+
     return Container(
-      padding: EdgeInsets.fromLTRB(16, 10, 16, MediaQuery.of(context).padding.bottom + 10),
+      padding: EdgeInsets.fromLTRB(16, 8, 16, MediaQuery.of(context).padding.bottom + 10),
       decoration: BoxDecoration(
-        color: kBackgroundDark,
-        border: Border(top: BorderSide(color: Colors.white.withOpacity(0.08))),
+        color: kProdOrderBg,
+        border: Border(top: BorderSide(color: Colors.white.withValues(alpha: 0.08))),
       ),
-      child: Row(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
         children: [
-          Expanded(
-            flex: 4,
-            child: SizedBox(
-              height: 52,
-              child: OutlinedButton(
-                onPressed: () => Navigator.of(context).pop(),
-                style: OutlinedButton.styleFrom(
-                  foregroundColor: kTextLight,
-                  side: BorderSide(color: Colors.white.withOpacity(0.2)),
-                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
-                ),
-                child: const Text('Quay lại', style: TextStyle(fontWeight: FontWeight.w700)),
-              ),
-            ),
+          Text(
+            statusLine,
+            style: const TextStyle(color: kProdOrderTextGray, fontSize: 11.5),
+            textAlign: TextAlign.center,
+            overflow: TextOverflow.ellipsis,
           ),
-          const SizedBox(width: 12),
-          Expanded(
-            flex: 5,
-            child: SizedBox(
-              height: 52,
-              child: ElevatedButton(
-                onPressed: _showCameraScanner,
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: kPrimaryColor,
-                  foregroundColor: Colors.white,
-                  padding: EdgeInsets.zero,
-                  elevation: 8,
-                  shadowColor: kPrimaryColor.withOpacity(0.5),
-                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-                ),
-                child: Column(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: [
-                    const Icon(Icons.qr_code_scanner, size: 20),
-                    const SizedBox(height: 2),
-                    Text(_palletScanned ? 'Quét bao' : 'Quét pallet', style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w800)),
-                  ],
+          const SizedBox(height: 8),
+          Row(
+            children: [
+              Expanded(
+                flex: 1,
+                child: SizedBox(
+                  height: 48,
+                  child: OutlinedButton(
+                    onPressed: () => Navigator.of(context).pop(),
+                    style: OutlinedButton.styleFrom(
+                      foregroundColor: Colors.white,
+                      side: BorderSide(color: Colors.white.withValues(alpha: 0.2)),
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                    ),
+                    child: const Text('Quay lại', style: TextStyle(fontWeight: FontWeight.w700, fontSize: 13)),
+                  ),
                 ),
               ),
-            ),
-          ),
-          const SizedBox(width: 12),
-          Expanded(
-            flex: 4,
-            child: SizedBox(
-              height: 52,
-              child: ElevatedButton(
-                onPressed: () {
-                  if (!_palletScanned) {
-                    _showSnack('Vui lòng quét pallet trước', isError: true);
-                    return;
-                  }
-                  _showSnack('✅ Đã lưu lại pallet', isError: false);
-                  Navigator.of(context).pop();
-                },
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: kPrimaryColor,
-                  foregroundColor: Colors.white,
-                  padding: EdgeInsets.zero,
-                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+              if (_palletScanned) ...[
+                const SizedBox(width: 12),
+                Expanded(
+                  flex: 1,
+                  child: SizedBox(
+                    height: 48,
+                    child: OutlinedButton(
+                      onPressed: _clearPallet,
+                      style: OutlinedButton.styleFrom(
+                        foregroundColor: kProdOrderAmber,
+                        side: const BorderSide(color: kProdOrderAmber),
+                        padding: const EdgeInsets.symmetric(horizontal: 6),
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                      ),
+                      child: const Text(
+                        'Đóng pallet khác',
+                        style: TextStyle(fontWeight: FontWeight.w700, fontSize: 12.5),
+                        textAlign: TextAlign.center,
+                      ),
+                    ),
+                  ),
                 ),
-                child: const Text('Lưu lại', textAlign: TextAlign.center, style: TextStyle(fontWeight: FontWeight.w700, fontSize: 14, height: 1.2)),
-              ),
-            ),
+              ],
+            ],
           ),
         ],
       ),

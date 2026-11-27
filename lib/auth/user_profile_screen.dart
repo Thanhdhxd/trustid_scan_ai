@@ -61,10 +61,12 @@ class _UserProfileScreenState extends ConsumerState<UserProfileScreen> {
         }
         return;
       }
+      if (!mounted) return;
       setState(() {
         _isLoggedIn = true;
       });
       await _fetchProfile();
+      if (!mounted) return;
       ref.read(authControllerProvider.notifier).refreshProfile();
     } else {
       if (mounted) {

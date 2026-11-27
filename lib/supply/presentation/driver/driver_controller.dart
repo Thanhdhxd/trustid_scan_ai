@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:geolocator/geolocator.dart';
 import 'dart:async';
@@ -12,28 +13,52 @@ final shipmentsProvider = FutureProvider.autoDispose<List<Shipment>>((ref) async
 class DriverController extends AsyncNotifier<void> {
   late final SupplyRepository _repo = ref.read(supplyRepositoryProvider);
 
+  static Position _fallbackPosition() => Position(
+        longitude: 0,
+        latitude: 0,
+        timestamp: DateTime.now(),
+        accuracy: 0,
+        altitude: 0,
+        heading: 0,
+        speed: 0,
+        speedAccuracy: 0,
+        altitudeAccuracy: 0,
+        headingAccuracy: 0,
+      );
+
   @override
   FutureOr<void> build() => null;
 
   Future<Position> _getGPS() async {
     try {
-      bool enabled = await Geolocator.isLocationServiceEnabled();
-      if (!enabled) return Position(longitude: 0, latitude: 0, timestamp: DateTime.now(), accuracy: 0, altitude: 0, heading: 0, speed: 0, speedAccuracy: 0, altitudeAccuracy: 0, headingAccuracy: 0);
+      return await Future<Position>(() async {
+        if (!kIsWeb) {
+          try {
+            final last = await Geolocator.getLastKnownPosition();
+            if (last != null) return last;
+          } catch (_) {}
+        }
 
-      LocationPermission perm = await Geolocator.checkPermission();
-      if (perm == LocationPermission.denied) {
-        perm = await Geolocator.requestPermission();
-      }
-      if (perm == LocationPermission.deniedForever) {
-        return Position(longitude: 0, latitude: 0, timestamp: DateTime.now(), accuracy: 0, altitude: 0, heading: 0, speed: 0, speedAccuracy: 0, altitudeAccuracy: 0, headingAccuracy: 0);
-      }
+        final enabled = await Geolocator.isLocationServiceEnabled();
+        if (!enabled) return _fallbackPosition();
 
-      return await Geolocator.getCurrentPosition(
-        desiredAccuracy: LocationAccuracy.medium,
-        timeLimit: const Duration(seconds: 5),
-      );
+        LocationPermission perm = await Geolocator.checkPermission();
+        if (perm == LocationPermission.denied) {
+          perm = await Geolocator.requestPermission();
+        }
+        if (perm == LocationPermission.denied || perm == LocationPermission.deniedForever) {
+          return _fallbackPosition();
+        }
+
+        return await Geolocator.getCurrentPosition(
+          locationSettings: const LocationSettings(
+            accuracy: LocationAccuracy.medium,
+            timeLimit: Duration(milliseconds: 1500),
+          ),
+        );
+      }).timeout(const Duration(milliseconds: 1500), onTimeout: _fallbackPosition);
     } catch (_) {
-      return Position(longitude: 0, latitude: 0, timestamp: DateTime.now(), accuracy: 0, altitude: 0, heading: 0, speed: 0, speedAccuracy: 0, altitudeAccuracy: 0, headingAccuracy: 0);
+      return _fallbackPosition();
     }
   }
 
@@ -47,6 +72,7 @@ class DriverController extends AsyncNotifier<void> {
         lat: pos.latitude,
         long: pos.longitude,
       );
+      await ref.refresh(shipmentsProvider.future);
     });
   }
 
@@ -62,6 +88,7 @@ class DriverController extends AsyncNotifier<void> {
         signature: signature,
         evidenceUrl: evidenceUrl,
       );
+      await ref.refresh(shipmentsProvider.future);
     });
   }
 }

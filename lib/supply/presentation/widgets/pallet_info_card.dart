@@ -21,18 +21,22 @@ class PalletInfoCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final fillPercent = maxBags > 0 ? currentBags / maxBags : 0.0;
-    final isFull = currentBags >= maxBags;
+    final fillPercent = maxBags > 0 ? (currentBags / maxBags).clamp(0.0, 1.0) : 0.0;
+    final isFull = maxBags > 0 && currentBags >= maxBags;
 
     return Container(
-      margin: const EdgeInsets.all(16),
-      padding: const EdgeInsets.all(16),
+      margin: const EdgeInsets.fromLTRB(16, 4, 16, 12),
+      padding: const EdgeInsets.all(14),
       decoration: BoxDecoration(
         color: kSurfaceDark,
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: kPrimaryColor.withOpacity(0.3)),
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: kPrimaryColor.withValues(alpha: 0.35)),
         boxShadow: [
-          BoxShadow(color: Colors.black.withOpacity(0.2), blurRadius: 10, offset: const Offset(0, 4)),
+          BoxShadow(
+            color: Colors.black.withValues(alpha: 0.2),
+            blurRadius: 10,
+            offset: const Offset(0, 4),
+          ),
         ],
       ),
       child: Column(
@@ -43,10 +47,10 @@ class PalletInfoCard extends StatelessWidget {
               Container(
                 padding: const EdgeInsets.all(10),
                 decoration: BoxDecoration(
-                  color: kPrimaryColor.withOpacity(0.15),
+                  color: kPrimaryColor.withValues(alpha: 0.15),
                   borderRadius: BorderRadius.circular(12),
                 ),
-                child: const Icon(Icons.palette_outlined, color: kPrimaryColor, size: 24),
+                child: const Icon(Icons.palette_outlined, color: kPrimaryColor, size: 22),
               ),
               const SizedBox(width: 12),
               Expanded(
@@ -55,18 +59,27 @@ class PalletInfoCard extends StatelessWidget {
                   children: [
                     Text(
                       palletCode,
-                      style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: kTextLight, letterSpacing: 1),
+                      style: const TextStyle(
+                        fontSize: 17,
+                        fontWeight: FontWeight.bold,
+                        color: kTextLight,
+                        letterSpacing: 0.8,
+                      ),
                     ),
-                    const SizedBox(height: 2),
+                    const SizedBox(height: 3),
                     Container(
                       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
                       decoration: BoxDecoration(
-                        color: _statusColor.withOpacity(0.15),
+                        color: _statusColor.withValues(alpha: 0.16),
                         borderRadius: BorderRadius.circular(4),
                       ),
                       child: Text(
                         _statusLabel,
-                        style: TextStyle(fontSize: 11, color: _statusColor, fontWeight: FontWeight.w600),
+                        style: TextStyle(
+                          fontSize: 11,
+                          color: _statusColor,
+                          fontWeight: FontWeight.w600,
+                        ),
                       ),
                     ),
                   ],
@@ -77,28 +90,34 @@ class PalletInfoCard extends StatelessWidget {
                 children: [
                   Text(
                     '$currentBags / $maxBags',
-                    style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold, color: kPrimaryColor),
+                    style: const TextStyle(
+                      fontSize: 19,
+                      fontWeight: FontWeight.bold,
+                      color: kPrimaryColor,
+                    ),
                   ),
                   const Text('bao', style: TextStyle(fontSize: 11, color: kTextGray)),
                 ],
               ),
             ],
           ),
-          const SizedBox(height: 12),
-          // Progress bar
+          const SizedBox(height: 10),
           ClipRRect(
             borderRadius: BorderRadius.circular(4),
             child: LinearProgressIndicator(
               value: fillPercent,
               minHeight: 6,
-              backgroundColor: Colors.white.withOpacity(0.1),
+              backgroundColor: Colors.white.withValues(alpha: 0.1),
               valueColor: AlwaysStoppedAnimation(isFull ? Colors.orange : kPrimaryColor),
             ),
           ),
           if (isFull)
             Padding(
               padding: const EdgeInsets.only(top: 6),
-              child: Text('⚠️ Pallet đã đầy', style: TextStyle(fontSize: 11, color: Colors.orange.shade300)),
+              child: Text(
+                'Pallet đã đạt sức chứa tối đa',
+                style: TextStyle(fontSize: 11, color: Colors.orange.shade300),
+              ),
             ),
         ],
       ),
@@ -107,20 +126,36 @@ class PalletInfoCard extends StatelessWidget {
 
   Color get _statusColor {
     switch (status.toUpperCase()) {
-      case 'ACTIVE': return kPrimaryColor;
-      case 'FULL': return Colors.orange;
-      case 'SEALED': return Colors.blue;
-      default: return kTextGray;
+      case 'LOADING':
+      case 'ACTIVE':
+        return kPrimaryColor;
+      case 'LOADED':
+      case 'FULL':
+        return Colors.orange;
+      case 'EXPORTING':
+      case 'SEALED':
+        return Colors.lightBlueAccent;
+      default:
+        return kTextGray;
     }
   }
 
   String get _statusLabel {
     switch (status.toUpperCase()) {
-      case 'EMPTY': return 'Trống';
-      case 'ACTIVE': return 'Đang xếp';
-      case 'FULL': return 'Đã đầy';
-      case 'SEALED': return 'Đã niêm';
-      default: return status;
+      case 'EMPTY':
+        return 'Trống';
+      case 'LOADING':
+      case 'ACTIVE':
+        return 'Đang xếp';
+      case 'LOADED':
+      case 'FULL':
+        return 'Đã đầy';
+      case 'EXPORTING':
+        return 'Đang xuất';
+      case 'SEALED':
+        return 'Đã niêm';
+      default:
+        return status;
     }
   }
 }

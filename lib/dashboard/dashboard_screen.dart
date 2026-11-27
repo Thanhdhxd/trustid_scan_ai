@@ -48,7 +48,9 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
 
   Widget _buildIconBtn(IconData icon, VoidCallback onTap) {
     return IconButton(
-      icon: Icon(icon, color: kTextGray),
+      constraints: const BoxConstraints(minWidth: 36, minHeight: 36),
+      padding: EdgeInsets.zero,
+      icon: Icon(icon, color: kTextGray, size: 20),
       onPressed: onTap,
     );
   }
@@ -162,56 +164,63 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
                   ),
                 ),
                 child: Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
                   children: [
-                    GestureDetector(
-                      onTap: () {
-                        Navigator.push(
-                          context,
-                          MaterialPageRoute(builder: (_) => const UserProfileScreen()),
-                        );
-                      },
-                      behavior: HitTestBehavior.opaque,
-                      child: Row(
-                        children: [
-                          UserAvatar(
-                            avatarUrl: avatar,
-                            fullName: fullName,
-                            size: 48,
-                            borderColor: kPrimaryColor,
-                            onTap: () {
-                              Navigator.push(
-                                context,
-                                MaterialPageRoute(builder: (_) => const UserProfileScreen()),
-                              );
-                            },
-                          ),
-                          const SizedBox(width: 12),
-                          Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              const Text(
-                                'Xin chào,',
-                                style: TextStyle(
-                                  color: kTextGray,
-                                  fontSize: 13,
-                                  fontWeight: FontWeight.w500,
-                                ),
+                    Expanded(
+                      child: GestureDetector(
+                        onTap: () {
+                          Navigator.push(
+                            context,
+                            MaterialPageRoute(builder: (_) => const UserProfileScreen()),
+                          );
+                        },
+                        behavior: HitTestBehavior.opaque,
+                        child: Row(
+                          children: [
+                            UserAvatar(
+                              avatarUrl: avatar,
+                              fullName: fullName,
+                              size: 42,
+                              borderColor: kPrimaryColor,
+                              onTap: () {
+                                Navigator.push(
+                                  context,
+                                  MaterialPageRoute(builder: (_) => const UserProfileScreen()),
+                                );
+                              },
+                            ),
+                            const SizedBox(width: 10),
+                            Expanded(
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  const Text(
+                                    'Xin chào,',
+                                    style: TextStyle(
+                                      color: kTextGray,
+                                      fontSize: 12,
+                                      fontWeight: FontWeight.w500,
+                                    ),
+                                  ),
+                                  Text(
+                                    fullName,
+                                    softWrap: true,
+                                    style: const TextStyle(
+                                      color: kTextLight,
+                                      fontSize: 14.5,
+                                      fontWeight: FontWeight.bold,
+                                      height: 1.2,
+                                    ),
+                                  ),
+                                ],
                               ),
-                              Text(
-                                fullName,
-                                style: const TextStyle(
-                                  color: kTextLight,
-                                  fontSize: 16,
-                                  fontWeight: FontWeight.bold,
-                                ),
-                              ),
-                            ],
-                          ),
-                        ],
+                            ),
+                          ],
+                        ),
                       ),
                     ),
+                    const SizedBox(width: 8),
                     Row(
+                      mainAxisSize: MainAxisSize.min,
                       children: [
                         _buildIconBtn(Icons.qr_code_scanner, () {
                           Navigator.push(

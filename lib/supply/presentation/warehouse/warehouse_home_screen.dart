@@ -329,8 +329,8 @@ class WarehouseHomeScreen extends ConsumerWidget {
             padding: EdgeInsets.only(
               top: MediaQuery.of(context).padding.top + 10,
               bottom: 12,
-              left: 16,
-              right: 16,
+              left: 12,
+              right: 12,
             ),
             decoration: BoxDecoration(
               color: kWarehouseBg.withOpacity(0.95),
@@ -339,61 +339,72 @@ class WarehouseHomeScreen extends ConsumerWidget {
               ),
             ),
             child: Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
-                Row(
-                  children: [
-                    UserAvatar(
-                      avatarUrl: user?.avatar,
-                      fullName: user?.fullName ?? 'Thủ kho',
-                      size: 40,
-                      borderColor: kWarehousePrimary,
-                      onTap: () {
-                        Navigator.push(
-                          context,
-                          MaterialPageRoute(builder: (_) => const UserProfileScreen()),
-                        );
-                      },
-                    ),
-                    const SizedBox(width: 12),
-                    Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        const Text('Xin chào,', style: TextStyle(color: kWarehouseTextMuted, fontSize: 12)),
-                        Text(
-                          user?.fullName ?? 'Thủ kho',
-                          style: const TextStyle(
-                            color: kWarehouseText,
-                            fontSize: 16,
-                            fontWeight: FontWeight.bold,
-                          ),
+                Expanded(
+                  child: Row(
+                    children: [
+                      UserAvatar(
+                        avatarUrl: user?.avatar,
+                        fullName: user?.fullName ?? 'Thủ kho',
+                        size: 40,
+                        borderColor: kWarehousePrimary,
+                        onTap: () {
+                          Navigator.push(
+                            context,
+                            MaterialPageRoute(builder: (_) => const UserProfileScreen()),
+                          );
+                        },
+                      ),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            const Text('Xin chào,', style: TextStyle(color: kWarehouseTextMuted, fontSize: 12)),
+                            Text(
+                              user?.fullName ?? 'Thủ kho',
+                              softWrap: true,
+                              style: const TextStyle(
+                                color: kWarehouseText,
+                                fontSize: 14.5,
+                                fontWeight: FontWeight.bold,
+                                height: 1.2,
+                              ),
+                            ),
+                          ],
                         ),
-                      ],
-                    ),
-                  ],
+                      ),
+                    ],
+                  ),
                 ),
+                const SizedBox(width: 8),
                 Row(
+                  mainAxisSize: MainAxisSize.min,
                   children: [
                     Container(
-                      margin: const EdgeInsets.only(right: 8),
+                      margin: const EdgeInsets.only(right: 6),
                       decoration: BoxDecoration(
                         color: Colors.black.withOpacity(0.2),
                         shape: BoxShape.circle,
                       ),
                       child: IconButton(
-                        icon: const Icon(Icons.qr_code_scanner, color: kWarehouseText, size: 22),
+                        constraints: const BoxConstraints(minWidth: 34, minHeight: 34),
+                        padding: EdgeInsets.zero,
+                        icon: const Icon(Icons.qr_code_scanner, color: kWarehouseText, size: 18),
                         tooltip: 'Quét mã',
                         onPressed: () => context.push('/consumer/scan'),
                       ),
                     ),
                     Container(
-                      margin: const EdgeInsets.only(right: 8),
+                      margin: const EdgeInsets.only(right: 6),
                       decoration: BoxDecoration(
                         color: Colors.black.withOpacity(0.2),
                         shape: BoxShape.circle,
                       ),
                       child: IconButton(
-                        icon: const Icon(Icons.home_outlined, color: kWarehouseText, size: 22),
+                        constraints: const BoxConstraints(minWidth: 34, minHeight: 34),
+                        padding: EdgeInsets.zero,
+                        icon: const Icon(Icons.home_outlined, color: kWarehouseText, size: 18),
                         tooltip: 'Trang chủ',
                         onPressed: () {
                           ref.invalidate(warehouseListProvider);
@@ -412,7 +423,9 @@ class WarehouseHomeScreen extends ConsumerWidget {
                         shape: BoxShape.circle,
                       ),
                       child: IconButton(
-                        icon: const Icon(Icons.logout, color: kWarehouseTextMuted, size: 22),
+                        constraints: const BoxConstraints(minWidth: 34, minHeight: 34),
+                        padding: EdgeInsets.zero,
+                        icon: const Icon(Icons.logout, color: kWarehouseTextMuted, size: 18),
                         tooltip: 'Đăng xuất',
                         onPressed: () async {
                           if (context.mounted) {

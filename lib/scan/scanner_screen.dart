@@ -11,12 +11,14 @@ class ScannerScreen extends ConsumerStatefulWidget {
   final String title;
   final String instruction;
   final bool returnCode;
+  final bool isWarehouseMode;
 
   const ScannerScreen({
     super.key,
     this.title = 'Quét mã sản phẩm',
     this.instruction = 'Đưa camera vào mã QR trên sản phẩm để tra cứu nguồn gốc',
     this.returnCode = false,
+    this.isWarehouseMode = false,
   });
 
   @override
@@ -57,7 +59,7 @@ class _ScannerScreenState extends ConsumerState<ScannerScreen> {
         
         final parsedCode = await QrParserUtil.parseQrCode(context, barcode.rawValue!);
         if (parsedCode != null && parsedCode.isNotEmpty) {
-          if (widget.returnCode) {
+          if (widget.returnCode || widget.isWarehouseMode) {
             if (mounted) Navigator.pop(context, parsedCode);
             return;
           }
@@ -109,7 +111,7 @@ class _ScannerScreenState extends ConsumerState<ScannerScreen> {
       if (parsedCode != null && parsedCode.isNotEmpty && mounted) {
         _handled = true;
         
-        if (widget.returnCode) {
+        if (widget.returnCode || widget.isWarehouseMode) {
           Navigator.pop(context, parsedCode);
           return;
         }

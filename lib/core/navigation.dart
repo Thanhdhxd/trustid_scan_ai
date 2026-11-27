@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:trustid_scan_ai/supply/presentation/bag_linking_screen.dart';
 import 'package:trustid_scan_ai/supply/presentation/pallet_linking_screen.dart';
+import 'package:trustid_scan_ai/supply/presentation/production_order_detail_screen.dart';
+import 'package:trustid_scan_ai/supply/presentation/standard_packaging_screen.dart';
 import 'package:trustid_scan_ai/supply/presentation/pallets/pallet_list_screen.dart';
 import 'package:trustid_scan_ai/supply/presentation/pallets/pallet_detail_screen.dart';
 import 'package:trustid_scan_ai/supply/presentation/export_orders/export_order_list_screen.dart';
@@ -52,6 +54,8 @@ import 'package:trustid_scan_ai/kcs/presentation/management/kcs_staff_detail_scr
 import 'package:trustid_scan_ai/home/weather/weather_detail_screen.dart';
 
 extension NavigationExtension on BuildContext {
+  bool canPop() => Navigator.of(this).canPop();
+
   void pop<T>([T? result]) {
     Navigator.of(this).pop(result);
   }
@@ -63,10 +67,10 @@ extension NavigationExtension on BuildContext {
         result: result,
       );
     }
-    final path = location;
-    if (path == '/manager/orders-bag-linking') {
+    final screen = _resolveScreen(location);
+    if (screen != null) {
       return Navigator.of(this).pushReplacement(
-        MaterialPageRoute(builder: (context) => const OrderListScreen(mode: 'bag-linking')),
+        MaterialPageRoute(builder: (context) => screen),
         result: result,
       );
     }
@@ -77,25 +81,30 @@ extension NavigationExtension on BuildContext {
     pushReplacement(path);
   }
 
-  Future<T?> push<T>(dynamic location, {Object? extra}) {
-    if (location is! String) {
-      // standard push with MaterialPageRoute
-      return Navigator.of(this).push(
-        MaterialPageRoute(builder: (context) => location as Widget),
-      );
-    }
-    
-    final path = location;
+  Widget? _resolveScreen(String location) {
+    final uri = Uri.tryParse(location);
+    final path = uri?.path ?? location;
+    final query = uri?.queryParameters ?? const <String, String>{};
     Widget? screen;
-    
+
     if (path == '/manager/production-orders/create' || path == '/supply/production-orders/create' || path == '/manager/create-production-order') {
       screen = const CreateProductionOrderScreen();
+    } else if (path == '/manager/production-orders') {
+      screen = const OrderListScreen(mode: 'bag-linking');
+    } else if (path.startsWith('/manager/production-orders/')) {
+      final id = path.replaceFirst('/manager/production-orders/', '');
+      screen = ProductionOrderDetailScreen(orderId: id);
     } else if (path.startsWith('/manager/bag-linking/')) {
-      final id = path.replaceAll('/manager/bag-linking/', '');
-      screen = BagLinkingScreen(orderId: id);
+      final id = path.replaceFirst('/manager/bag-linking/', '');
+      screen = BagLinkingScreen(orderId: id, initialReceiptId: query['receiptId']);
+    } else if (path.startsWith('/manager/standard-packaging/')) {
+      final id = path.replaceFirst('/manager/standard-packaging/', '');
+      screen = StandardPackagingScreen(orderId: id, initialTicketId: query['ticketId']);
+    } else if (path == '/manager/pallet-linking') {
+      screen = const PalletLinkingScreen();
     } else if (path.startsWith('/manager/pallet-linking/')) {
-      final id = path.replaceAll('/manager/pallet-linking/', '');
-      screen = PalletLinkingScreen(orderId: id);
+      final id = path.replaceFirst('/manager/pallet-linking/', '');
+      screen = PalletLinkingScreen(orderId: id.isEmpty ? null : id);
     } else if (path == '/manager/orders-bag-linking') {
       screen = const OrderListScreen(mode: 'bag-linking');
     } else if (path == '/manager/orders-pallet-linking') {
@@ -107,8 +116,6 @@ extension NavigationExtension on BuildContext {
       screen = PalletDetailScreen(palletId: id);
     } else if (path == '/manager/export-sheets') {
       screen = const ExportOrderSheetScreen();
-    } else if (path == '/manager/orders-bag-linking') {
-      screen = const OrderListScreen(mode: 'bag-linking');
     } else if (path == '/manager/export-orders') {
       screen = const ExportOrderListScreen();
     } else if (path == '/manager/sf-pallets') {
@@ -221,14 +228,26 @@ extension NavigationExtension on BuildContext {
     } else if (path == '/consumer/notifications') {
       screen = const PlaceholderScreen(title: 'Thông báo');
     }
-    
+
+    return screen;
+  }
+
+  Future<T?> push<T>(dynamic location, {Object? extra}) {
+    if (location is! String) {
+      // standard push with MaterialPageRoute
+      return Navigator.of(this).push(
+        MaterialPageRoute(builder: (context) => location as Widget),
+      );
+    }
+
+    final screen = _resolveScreen(location);
     if (screen != null) {
       return Navigator.of(this).push<T>(
-        MaterialPageRoute(builder: (context) => screen!),
+        MaterialPageRoute(builder: (context) => screen),
       );
     }
     
-    print('Navigation path not matched: $path');
+    print('Navigation path not matched: $location');
     return Future.value(null);
   }
   

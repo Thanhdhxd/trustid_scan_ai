@@ -574,8 +574,8 @@ class _KcsDashboardScreenState extends ConsumerState<KcsDashboardScreen> {
                   children: [
                     Text(
                       'Xin chào, $userName',
-                      style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: kTextLight),
-                      overflow: TextOverflow.ellipsis,
+                      softWrap: true,
+                      style: const TextStyle(fontSize: 15.5, fontWeight: FontWeight.bold, color: kTextLight),
                     ),
                     const SizedBox(height: 2),
                     const Text(

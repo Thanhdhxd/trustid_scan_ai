@@ -201,7 +201,7 @@ flutter pub get
 # Chạy trên nền tảng Chrome Web (Khuyến nghị dùng script dev bypass CORS)
 $env:CHROME_EXECUTABLE = "D:\chrome-dev.bat"
 flutter run -d chrome
-
+ # 1E99A669765B8AAB
 # Hoặc chạy trên máy ảo Android / thiết bị thật
 flutter run
 ```

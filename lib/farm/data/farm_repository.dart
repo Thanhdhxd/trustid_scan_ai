@@ -305,6 +305,36 @@ class FarmRepository {
     }
   }
 
+  /// Tìm kiếm lô thu hoạch khả dụng theo sản phẩm và từ khóa (Remote Search).
+  Future<List<Map<String, dynamic>>> getHarvestSourceOptions({
+    String? productId,
+    String? search,
+    String? status,
+    bool hideEmptyStock = true,
+    int limit = 20,
+  }) async {
+    final params = <String, dynamic>{
+      'limit': limit,
+      'hideEmptyStock': hideEmptyStock ? 'true' : 'false',
+      if (productId != null && productId.isNotEmpty) 'productId': productId,
+      if (search != null && search.trim().isNotEmpty) 'search': search.trim(),
+      if (status != null && status.isNotEmpty) 'status': status,
+    };
+    final response = await _dio.get('/farm/harvests/source-options', queryParameters: params);
+    final raw = response.data;
+    final List<dynamic> list = raw is List
+        ? raw
+        : (raw is Map && raw['data'] is List
+            ? raw['data'] as List
+            : (raw is Map && raw['items'] is List ? raw['items'] as List : const []));
+    return list.whereType<Map>().map((h) {
+      final m = Map<String, dynamic>.from(h);
+      final rem = m['remainingQuantityKg'] ?? m['remaining_quantity_kg'] ?? m['quantityKg'] ?? m['quantity_kg'];
+      m['remainingQuantityKg'] = double.tryParse(rem?.toString() ?? '') ?? 0.0;
+      return m;
+    }).toList();
+  }
+
   Future<void> updateHarvestStatus(String id, String status) async {
     try {
       await _dio.patch('/farm/harvests/$id/status', data: {'status': status});

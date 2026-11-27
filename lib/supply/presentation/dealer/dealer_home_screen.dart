@@ -217,8 +217,8 @@ class DealerHomeScreen extends ConsumerWidget {
                 padding: EdgeInsets.only(
                   top: MediaQuery.of(context).padding.top + 10,
                   bottom: 12,
-                  left: 16,
-                  right: 16,
+                  left: 12,
+                  right: 12,
                 ),
                 decoration: BoxDecoration(
                   color: kDealerBg.withOpacity(0.95),
@@ -227,65 +227,74 @@ class DealerHomeScreen extends ConsumerWidget {
                   ),
                 ),
                 child: Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
                   children: [
-                    Row(
-                      children: [
-                        UserAvatar(
-                          avatarUrl: authState.value?.avatar,
-                          fullName: authState.value?.fullName ?? 'Đại lý',
-                          size: 48,
-                          borderColor: kDealerPrimary,
-                          onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const UserProfileScreen())),
-                        ),
-                        const SizedBox(width: 12),
-                        Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            const Text(
-                              'Xin chào,',
-                              style: TextStyle(
-                                color: kDealerTextMuted,
-                                fontSize: 13,
-                                fontWeight: FontWeight.w500,
-                              ),
-                            ),
-                            authState.when(
-                              data: (user) => Text(
-                                user != null ? user.fullName : 'Đại lý',
-                                style: const TextStyle(
-                                  color: kDealerText,
-                                  fontSize: 16,
-                                  fontWeight: FontWeight.bold,
+                    Expanded(
+                      child: Row(
+                        children: [
+                          UserAvatar(
+                            avatarUrl: authState.value?.avatar,
+                            fullName: authState.value?.fullName ?? 'Đại lý',
+                            size: 40,
+                            borderColor: kDealerPrimary,
+                            onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const UserProfileScreen())),
+                          ),
+                          const SizedBox(width: 8),
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                const Text(
+                                  'Xin chào,',
+                                  style: TextStyle(
+                                    color: kDealerTextMuted,
+                                    fontSize: 12,
+                                    fontWeight: FontWeight.w500,
+                                  ),
                                 ),
-                              ),
-                              loading: () => const SizedBox(
-                                width: 60,
-                                height: 16,
-                                child: LinearProgressIndicator(
-                                  color: kDealerPrimary,
-                                  backgroundColor: kDealerSurface,
+                                authState.when(
+                                  data: (user) => Text(
+                                    user != null ? user.fullName : 'Đại lý',
+                                    softWrap: true,
+                                    style: const TextStyle(
+                                      color: kDealerText,
+                                      fontSize: 14.5,
+                                      fontWeight: FontWeight.bold,
+                                      height: 1.2,
+                                    ),
+                                  ),
+                                  loading: () => const SizedBox(
+                                    width: 60,
+                                    height: 16,
+                                    child: LinearProgressIndicator(
+                                      color: kDealerPrimary,
+                                      backgroundColor: kDealerSurface,
+                                    ),
+                                  ),
+                                  error: (e, s) => const Text(
+                                    'Error',
+                                    style: TextStyle(color: Colors.red),
+                                  ),
                                 ),
-                              ),
-                              error: (e, s) => const Text(
-                                'Error',
-                                style: TextStyle(color: Colors.red),
-                              ),
+                              ],
                             ),
-                          ],
-                        ),
-                      ],
+                          ),
+                        ],
+                      ),
                     ),
+                    const SizedBox(width: 8),
                     Row(
+                      mainAxisSize: MainAxisSize.min,
                       children: [
                         Container(
-                          margin: const EdgeInsets.only(right: 8),
+                          margin: const EdgeInsets.only(right: 6),
                           decoration: BoxDecoration(
                             color: Colors.black.withOpacity(0.2),
                             shape: BoxShape.circle,
                           ),
                           child: IconButton(
-                            icon: const Icon(Icons.qr_code_scanner, color: kDealerText, size: 22),
+                            constraints: const BoxConstraints(minWidth: 34, minHeight: 34),
+                            padding: EdgeInsets.zero,
+                            icon: const Icon(Icons.qr_code_scanner, color: kDealerText, size: 18),
                             tooltip: 'Quét mã',
                             onPressed: () {
                               Navigator.push(
@@ -296,13 +305,15 @@ class DealerHomeScreen extends ConsumerWidget {
                           ),
                         ),
                         Container(
-                          margin: const EdgeInsets.only(right: 8),
+                          margin: const EdgeInsets.only(right: 6),
                           decoration: BoxDecoration(
                             color: Colors.black.withOpacity(0.2),
                             shape: BoxShape.circle,
                           ),
                           child: IconButton(
-                            icon: const Icon(Icons.home_outlined, color: kDealerText, size: 22),
+                            constraints: const BoxConstraints(minWidth: 34, minHeight: 34),
+                            padding: EdgeInsets.zero,
+                            icon: const Icon(Icons.home_outlined, color: kDealerText, size: 18),
                             tooltip: 'Trang chủ',
                             onPressed: () {
                               ref.invalidate(dealerDashboardStatsProvider);
@@ -320,7 +331,9 @@ class DealerHomeScreen extends ConsumerWidget {
                             shape: BoxShape.circle,
                           ),
                           child: IconButton(
-                            icon: const Icon(Icons.logout, color: kDealerTextMuted, size: 22),
+                            constraints: const BoxConstraints(minWidth: 34, minHeight: 34),
+                            padding: EdgeInsets.zero,
+                            icon: const Icon(Icons.logout, color: kDealerTextMuted, size: 18),
                             tooltip: 'Đăng xuất',
                             onPressed: () async {
                               if (context.mounted) {

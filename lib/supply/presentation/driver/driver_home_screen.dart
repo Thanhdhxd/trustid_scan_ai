@@ -54,8 +54,9 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Single
     final user = ref.watch(authControllerProvider).value;
 
     ref.listen(driverControllerProvider, (prev, next) {
-      next.whenOrNull(
-        error: (err, stack) {
+      if (prev?.isLoading == true && !next.isLoading) {
+        if (next.hasError) {
+          final err = next.error;
           String errMsg = 'Lỗi: $err';
           if (err.toString().contains('403')) {
             errMsg = 'Bạn không phải tài xế được chỉ định cho chuyến hàng này!';
@@ -63,14 +64,12 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Single
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(content: Text(errMsg), backgroundColor: Colors.red),
           );
-        },
-        data: (_) {
-          ref.invalidate(shipmentsProvider);
+        } else {
           ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('Thành công!'), backgroundColor: Colors.green),
+            const SnackBar(content: Text('Cập nhật trạng thái thành công!'), backgroundColor: Colors.green),
           );
-        },
-      );
+        }
+      }
     });
 
     return Scaffold(
@@ -152,6 +151,9 @@ class _DriverHomeScreenState extends ConsumerState<DriverHomeScreen> with Single
           unselectedLabelColor: kTextGray,
           indicatorColor: kPrimaryColor,
           indicatorWeight: 3,
+          labelPadding: const EdgeInsets.symmetric(horizontal: 4),
+          labelStyle: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600),
+          unselectedLabelStyle: const TextStyle(fontSize: 12, fontWeight: FontWeight.w500),
           tabs: const [
             Tab(icon: Icon(Icons.list_alt), text: 'Tất cả'),
             Tab(icon: Icon(Icons.inbox), text: 'Chờ nhận'),
@@ -402,12 +404,20 @@ class _ShipmentCard extends ConsumerWidget {
                 Align(
                   alignment: Alignment.centerRight,
                   child: ElevatedButton.icon(
-                    icon: const Icon(Icons.download, size: 16),
-                    label: const Text('Nhận hàng'),
+                    icon: isLoading
+                        ? const SizedBox(
+                            width: 14,
+                            height: 14,
+                            child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
+                          )
+                        : const Icon(Icons.download, size: 16),
+                    label: Text(isLoading ? 'Đang xử lý...' : 'Nhận hàng'),
                     onPressed: isLoading ? null : () => _confirmPickup(context, ref),
                     style: ElevatedButton.styleFrom(
                       backgroundColor: Colors.orangeAccent,
                       foregroundColor: Colors.white,
+                      disabledBackgroundColor: Colors.orangeAccent.withOpacity(0.55),
+                      disabledForegroundColor: Colors.white,
                       elevation: 0,
                     ),
                   ),
@@ -434,12 +444,20 @@ class _ShipmentCard extends ConsumerWidget {
                       children: [
                         if (['WAITING_DRIVER'].contains(shipment.status.toUpperCase()))
                           ElevatedButton.icon(
-                            icon: const Icon(Icons.download, size: 16),
-                            label: const Text('Nhận hàng'),
+                            icon: isLoading
+                                ? const SizedBox(
+                                    width: 14,
+                                    height: 14,
+                                    child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
+                                  )
+                                : const Icon(Icons.download, size: 16),
+                            label: Text(isLoading ? 'Đang xử lý...' : 'Nhận hàng'),
                             onPressed: isLoading ? null : () => _confirmPickup(context, ref),
                             style: ElevatedButton.styleFrom(
                               backgroundColor: Colors.orangeAccent,
                               foregroundColor: Colors.white,
+                              disabledBackgroundColor: Colors.orangeAccent.withOpacity(0.55),
+                              disabledForegroundColor: Colors.white,
                               elevation: 0,
                             ),
                           ),
